@@ -1,0 +1,686 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+from collections import defaultdict
+import string
+import tensorflow as tf
+import re
+import os
+import time
+from tensorflow import keras
+from tensorflow.keras.layers import Dense, Input
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.models import Model
+from tensorflow.keras.callbacks import ModelCheckpoint
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.model_selection import train_test_split
+
+# ENCODER_LEN = 200
+# DECODER_LEN = 70
+# BATCH_SIZE = 36
+# BUFFER_SIZE = BATCH_SIZE*8
+ENCODER_LEN = 200
+DECODER_LEN = 100
+BATCH_SIZE = 128
+BUFFER_SIZE = BATCH_SIZE*8
+# news = pd.read_csv("samples1.csv")
+#----------------------------------one way--------------------------------------------------
+# article = news['Question']
+# summary = news['Answer']
+# # news_subset = news.head(20)
+# #
+# # # Access the 'Headline' and 'Content' columns from the subset
+# # article = news_subset['Headline']
+# # summary = news_subset['Content']
+# article = article.apply(lambda x: '<SOS> ' + str(x) + ' <EOS>')
+# summary = summary.apply(lambda x: '<SOS> ' + str(x) + ' <EOS>')
+# # def preprocess(text):
+# #     text = re.sub(r"&.[1-9]+;₹"," ",text)
+# #     return text
+#
+# def preprocess(text):
+#     # Remove HTML entities like "&1234;", and the symbol ₹
+#     text = re.sub(r"&[1-9]+;|₹", " ", text)  # Updated regex for both patterns
+#     # Remove single quotes (')
+#     # text = re.sub(r"'", "", text)
+#     text = re.sub(r"'", "", text)
+#     # Remove single double quotes (") within words
+#     text = re.sub(r'(\w)"(\w)', r'\1\2', text)
+#     return text
+#
+# # def preprocess_text(text):
+# #     # Remove special characters (e.g., ₹) from words
+# #     return re.sub(r"[₹]", "", text)
+#
+# article = article.apply(lambda x: preprocess(x))
+# summary = summary.apply(lambda x: preprocess(x))
+#
+#
+#
+#
+# filters = '₹!"#$%&()*+,-./:;=?@[\\]^_`{|}~\t\n'
+# oov_token = '<unk>'
+# article_tokenizer = tf.keras.preprocessing.text.Tokenizer(oov_token=oov_token)
+# summary_tokenizer = tf.keras.preprocessing.text.Tokenizer(filters=filters, oov_token=oov_token)
+#
+# article_tokenizer.fit_on_texts(article)
+# summary_tokenizer.fit_on_texts(summary)
+#
+#
+# # Print the word indices
+# # print("Article Tokenizer Word Index:", article_tokenizer.word_index)
+# # print("Summary Tokenizer Word Index:", summary_tokenizer.word_index)
+#
+# def filter_nan_token(tokenizer):
+#   """Filters out the 'nan' token (if present) from the tokenizer."""
+#
+#   if 'nan' in tokenizer.word_index:  # Check if 'nan' is in the vocabulary
+#       nan_token_id = tokenizer.word_index['nan']
+#
+#       # If nan_token_id is 3, proceed to filter it out
+#       if nan_token_id == 3:
+#           # Adjust word_index, index_word, and word_counts
+#           del tokenizer.word_index['nan']
+#           tokenizer.index_word = {
+#               index: word for index, word in tokenizer.index_word.items()
+#               if index != nan_token_id
+#           }
+#           del tokenizer.word_counts['nan']
+#
+#           # Re-assign token IDs (shift down by 1 for tokens > nan_token_id)
+#           for word, index in list(tokenizer.word_index.items()):
+#               if index > nan_token_id:
+#                   tokenizer.word_index[word] = index - 1
+#
+#           tokenizer.index_word = {
+#               index: word for word, index in tokenizer.word_index.items()
+#           }
+#
+# # Filter 'nan' token from both tokenizers
+# filter_nan_token(article_tokenizer)
+# filter_nan_token(summary_tokenizer)
+# inputs = article_tokenizer.texts_to_sequences(article)
+# targets = summary_tokenizer.texts_to_sequences(summary)
+#
+#
+# ENCODER_VOCAB = len(article_tokenizer.word_index) + 1
+# DECODER_VOCAB = len(summary_tokenizer.word_index) + 1
+# # print(ENCODER_VOCAB, DECODER_VOCAB)
+#
+# inputs = tf.keras.preprocessing.sequence.pad_sequences(inputs, maxlen=ENCODER_LEN, padding='post', truncating='post')
+# targets = tf.keras.preprocessing.sequence.pad_sequences(targets, maxlen=DECODER_LEN, padding='post', truncating='post')
+#
+# print("Article Tokenizer Word Index (Word to Token):")
+# print(article_tokenizer.word_index)
+#
+# print("\nArticle Tokenizer Index Word (Token to Word):")
+# print(article_tokenizer.index_word)
+# inputs = tf.cast(inputs, dtype=tf.int64)
+# targets = tf.cast(targets, dtype=tf.int64)
+#
+# dataset = tf.data.Dataset.from_tensor_slices((inputs, targets)).shuffle(BUFFER_SIZE).batch(BATCH_SIZE)
+#----------------------------------------------------------------------------------------
+
+#--------------------------------------proccessing numbers-----------------------------------
+
+
+news = pd.read_csv("addition_dataset.csv")  # Replace with your file path
+article = news['Input']
+summary = news['Output']
+
+# Add SOS and EOS tokens
+article = article.apply(lambda x: '<SOS> ' + str(x) + ' <EOS>')
+summary = summary.apply(lambda x: '<SOS> ' + str(x) + ' <EOS>')
+#
+#
+# # Preprocessing function to separate numbers and operators
+# def preprocess(text):
+#     # Add spaces around operators for proper tokenization
+#     text = re.sub(r"(\d+)([+])(\d+)", r"\1 \2 \3", text)  # e.g., "12+14" → "12 + 14"
+#     return text
+
+
+def preprocess(text):
+    # Tokenize numbers and separate them into digits
+    text = re.sub(r'(\d+)', lambda match: ' '.join(list(match.group(0))), text)  # e.g., "64" → "6 4"
+
+    # Add spaces around operators for proper tokenization
+    text = re.sub(r"(\+|\-|\*|/|=)", r" \1 ", text)  # Add spaces around operators
+
+    # Tokenize spaces between words
+    text = re.sub(r'\s+', ' ', text).strip()  # Normalize spaces
+
+    # Make text lowercase
+    text = text.lower()
+
+    return text
+
+
+# Apply the preprocessing function to the input and output text
+# article = article.apply(preprocess)
+# summary = summary.apply(preprocess)
+
+# Output the processed text for inspection
+
+
+# Apply preprocessing
+article = article.apply(preprocess)
+summary = summary.apply(preprocess)
+
+print("Processed Article:", article.head())
+print("Processed Summary:", summary.head())
+# print(article)
+# print(summary)
+
+# Tokenization
+filters = '₹!"#$%&()*,-./:;=?@[\\]^_`{|}~\t\n'
+oov_token = '<unk>'
+
+article_tokenizer = tf.keras.preprocessing.text.Tokenizer(filters=filters, oov_token=oov_token)
+summary_tokenizer = tf.keras.preprocessing.text.Tokenizer(filters=filters, oov_token=oov_token)
+
+# Fit tokenizers on preprocessed data
+article_tokenizer.fit_on_texts(article)
+summary_tokenizer.fit_on_texts(summary)
+
+# Convert text to sequences
+inputs = article_tokenizer.texts_to_sequences(article)
+targets = summary_tokenizer.texts_to_sequences(summary)
+# print(inputs)
+
+# Vocabulary sizes
+ENCODER_VOCAB = len(article_tokenizer.word_index) + 1
+DECODER_VOCAB = len(summary_tokenizer.word_index) + 1
+
+# Pad sequences
+ENCODER_LEN = 70  # Maximum length of input sequences
+DECODER_LEN = 40   # Maximum length of output sequences
+
+inputs = tf.keras.preprocessing.sequence.pad_sequences(inputs, maxlen=ENCODER_LEN, padding='post', truncating='post')
+targets = tf.keras.preprocessing.sequence.pad_sequences(targets, maxlen=DECODER_LEN, padding='post', truncating='post')
+input_texts_padded = [' '.join([article_tokenizer.index_word.get(token, '') for token in seq]) for seq in inputs]
+target_texts_padded = [' '.join([summary_tokenizer.index_word.get(token, '') for token in seq]) for seq in targets]
+
+# Print tokenizers' word index
+print("Article Tokenizer Word Index (Word to Token):")
+print(article_tokenizer.word_index)
+
+print("\nSummary Tokenizer Word Index (Word to Token):")
+print(summary_tokenizer.word_index)
+
+# print("\nSample Input Sequence:", inputs[0])
+# print("\nSample Input Sequence:", inputs[1])
+#
+# print("Sample Output Sequence:", targets[0])
+# print("Sample Output Sequence:", targets[1])
+
+word_43 = article_tokenizer.index_word.get(43, "Not found")
+word_35 = article_tokenizer.index_word.get(35, "Not found")
+word_72 = summary_tokenizer.index_word.get(35, "Not found")
+
+# print("Word at index 43:", word_43)
+# print("Word at index 35:", word_35)
+
+inputs = tf.cast(inputs, dtype=tf.int64)
+
+targets = tf.cast(targets, dtype=tf.int64)
+dataset = tf.data.Dataset.from_tensor_slices((inputs, targets)).shuffle(BUFFER_SIZE).batch(BATCH_SIZE)
+
+
+#-------------------------------------------------------------------------------------------
+
+
+#--------------------------transformer---------------------------------------
+
+
+def get_angles(position, i, d_model):
+    angle_rates = 1 / np.power(10000, (2 * (i // 2)) / np.float32(d_model))
+    return position * angle_rates
+
+def positional_encoding(position, d_model):
+    angle_rads = get_angles(
+        np.arange(position)[:, np.newaxis],
+        np.arange(d_model)[np.newaxis, :],
+        d_model
+    )
+
+    angle_rads[:, 0::2] = np.sin(angle_rads[:, 0::2])
+
+    angle_rads[:, 1::2] = np.cos(angle_rads[:, 1::2])
+
+    pos_encoding = angle_rads[np.newaxis, ...]
+
+    return tf.cast(pos_encoding, dtype=tf.float32)
+
+def create_padding_mask(seq):
+    seq = tf.cast(tf.math.equal(seq, 0), tf.float32)
+    return seq[:, tf.newaxis, tf.newaxis, :]
+
+def create_look_ahead_mask(size):
+    mask = 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
+    return mask
+
+def scaled_dot_product_attention(q, k, v, mask):
+    matmul_qk = tf.matmul(q, k, transpose_b=True)
+
+    dk = tf.cast(tf.shape(k)[-1], tf.float32)
+    scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
+    # print('loggits')
+    # tf.print(scaled_attention_logits)
+
+    if mask is not None:
+        scaled_attention_logits += (mask * -1e9)
+
+    attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)
+
+    output = tf.matmul(attention_weights, v)
+    return output, attention_weights
+
+
+class MultiHeadAttention(tf.keras.layers.Layer):
+    def __init__(self, d_model, num_heads):
+        super(MultiHeadAttention, self).__init__()
+        self.num_heads = num_heads
+        self.d_model = d_model
+
+        assert d_model % self.num_heads == 0
+
+        self.depth = d_model // self.num_heads
+
+        self.wq = tf.keras.layers.Dense(d_model)
+        self.wk = tf.keras.layers.Dense(d_model)
+        self.wv = tf.keras.layers.Dense(d_model)
+
+        self.dense = tf.keras.layers.Dense(d_model)
+
+    def split_heads(self, x, batch_size):
+        x = tf.reshape(x, (batch_size, -1, self.num_heads, self.depth))
+        return tf.transpose(x, perm=[0, 2, 1, 3])
+
+    def call(self, v, k, q, mask):
+        batch_size = tf.shape(q)[0]
+
+        q = self.wq(q)
+        k = self.wk(k)
+        v = self.wv(v)
+
+        q = self.split_heads(q, batch_size)
+        k = self.split_heads(k, batch_size)
+        v = self.split_heads(v, batch_size)
+
+        scaled_attention, attention_weights = scaled_dot_product_attention(
+            q, k, v, mask)
+
+        # tf.print("Attention weights matrix structure (example 1, head 1):", attention_weights[2,3], summarize=-1)
+
+        scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
+
+        concat_attention = tf.reshape(scaled_attention, (batch_size, -1, self.d_model))
+        output = self.dense(concat_attention)
+        # print('output')
+        # print(output)
+        # tf.print("ouuput matrix structure (example 1, head 1):", output)
+
+
+        return output, attention_weights
+
+
+def point_wise_feed_forward_network(d_model, dff):
+    return tf.keras.Sequential([
+        tf.keras.layers.Dense(dff, activation='relu'),
+        tf.keras.layers.Dense(d_model)
+    ])
+
+
+class EncoderLayer(tf.keras.layers.Layer):
+    def __init__(self, d_model, num_heads, dff, rate=0.1):
+        super(EncoderLayer, self).__init__()
+
+        self.mha = MultiHeadAttention(d_model, num_heads)
+        self.ffn = point_wise_feed_forward_network(d_model, dff)
+
+        self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+
+        self.dropout1 = tf.keras.layers.Dropout(rate)
+        self.dropout2 = tf.keras.layers.Dropout(rate)
+
+    def call(self, x, training, mask):
+        attn_output, _ = self.mha(x, x, x, mask)
+        attn_output = self.dropout1(attn_output, training=training)
+        out1 = self.layernorm1(x + attn_output)
+
+        ffn_output = self.ffn(out1)
+        ffn_output = self.dropout2(ffn_output, training=training)
+        out2 = self.layernorm2(out1 + ffn_output)
+
+        return out2
+
+
+class DecoderLayer(tf.keras.layers.Layer):
+    def __init__(self, d_model, num_heads, dff, rate=0.1):
+        super(DecoderLayer, self).__init__()
+
+        self.mha1 = MultiHeadAttention(d_model, num_heads)
+        self.mha2 = MultiHeadAttention(d_model, num_heads)
+
+        self.ffn = point_wise_feed_forward_network(d_model, dff)
+
+        self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        self.layernorm3 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+
+        self.dropout1 = tf.keras.layers.Dropout(rate)
+        self.dropout2 = tf.keras.layers.Dropout(rate)
+        self.dropout3 = tf.keras.layers.Dropout(rate)
+
+    def call(self, x, enc_output, training, look_ahead_mask, padding_mask):
+        attn1, attn_weights_block1 = self.mha1(x, x, x, look_ahead_mask)
+        attn1 = self.dropout1(attn1, training=training)
+        out1 = self.layernorm1(attn1 + x)
+
+        attn2, attn_weights_block2 = self.mha2(enc_output, enc_output, out1, padding_mask)
+        attn2 = self.dropout2(attn2, training=training)
+        out2 = self.layernorm2(attn2 + out1)
+
+        ffn_output = self.ffn(out2)
+        ffn_output = self.dropout3(ffn_output, training=training)
+        out3 = self.layernorm3(ffn_output + out2)
+
+        return out3, attn_weights_block1, attn_weights_block2
+
+
+class Encoder(tf.keras.layers.Layer):
+    def __init__(self, num_layers, d_model, num_heads, dff, input_vocab_size, maximum_position_encoding, rate=0.1):
+        super(Encoder, self).__init__()
+
+        self.d_model = d_model
+        self.num_layers = num_layers
+
+        self.embedding = tf.keras.layers.Embedding(input_vocab_size, d_model)
+        self.pos_encoding = positional_encoding(maximum_position_encoding, self.d_model)
+
+        self.enc_layers = [EncoderLayer(d_model, num_heads, dff, rate) for _ in range(num_layers)]
+
+        self.dropout = tf.keras.layers.Dropout(rate)
+
+    def call(self, x, training, mask):
+        seq_len = tf.shape(x)[1]
+
+        x = self.embedding(x)
+        x *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
+        x += self.pos_encoding[:, :seq_len, :]
+
+        x = self.dropout(x, training=training)
+
+        for i in range(self.num_layers):
+            x = self.enc_layers[i](x, training=training, mask=mask)
+
+        return x
+
+
+class Decoder(tf.keras.layers.Layer):
+
+    def __init__(self, num_layers, d_model, num_heads, dff, target_vocab_size, maximum_position_encoding, rate=0.1):
+        super(Decoder, self).__init__()
+
+        self.d_model = d_model
+        self.num_layers = num_layers
+
+        self.embedding = tf.keras.layers.Embedding(target_vocab_size, d_model)
+        self.pos_encoding = positional_encoding(maximum_position_encoding, d_model)
+
+        self.dec_layers = [DecoderLayer(d_model, num_heads, dff, rate) for _ in range(num_layers)]
+        self.dropout = tf.keras.layers.Dropout(rate)
+
+    def call(self, x, enc_output, training, look_ahead_mask, padding_mask):
+        seq_len = tf.shape(x)[1]
+        attention_weights = {}
+
+        x = self.embedding(x)
+        x *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
+        x += self.pos_encoding[:, :seq_len, :]
+
+        x = self.dropout(x, training=training)
+
+        for i in range(self.num_layers):
+            x, block1, block2 = self.dec_layers[i](x, enc_output, training=training, look_ahead_mask=look_ahead_mask, padding_mask=padding_mask)
+
+            attention_weights['decoder_layer{}_block1'.format(i + 1)] = block1
+            attention_weights['decoder_layer{}_block2'.format(i + 1)] = block2
+
+        return x, attention_weights
+
+class Transformer(tf.keras.Model):
+    def __init__(self, num_layers, d_model, num_heads, dff, input_vocab_size, target_vocab_size, pe_input,
+                     pe_target, rate=0.1):
+        super(Transformer, self).__init__()
+
+        self.encoder = Encoder(num_layers, d_model, num_heads, dff, input_vocab_size, pe_input, rate)
+
+        self.decoder = Decoder(num_layers, d_model, num_heads, dff, target_vocab_size, pe_target, rate)
+
+        self.final_layer = tf.keras.layers.Dense(target_vocab_size)
+
+    def call(self, inp, tar, training, enc_padding_mask, look_ahead_mask, dec_padding_mask):
+        enc_output = self.encoder(inp, training=training, mask=enc_padding_mask)
+
+        dec_output, attention_weights = self.decoder(tar, enc_output, training=training, look_ahead_mask=look_ahead_mask, padding_mask=dec_padding_mask)
+
+        final_output = self.final_layer(dec_output)
+
+        return final_output, attention_weights
+
+# num_layers = 6
+# d_model = 128
+# dff = 512
+# num_heads = 8
+# dropout_rate = 0.3
+# EPOCHS = 90
+
+num_layers = 3
+# d_model = 128
+d_model=64
+dff = 512
+num_heads = 8
+dropout_rate = 0.2
+EPOCHS = 15
+
+class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
+    def __init__(self, d_model, warmup_steps=4000):
+        super(CustomSchedule, self).__init__()
+
+        self.d_model = d_model
+        self.d_model = tf.cast(self.d_model, tf.float32)
+
+        self.warmup_steps = warmup_steps
+
+
+    def __call__(self, step):
+        step = tf.cast(step, dtype=tf.float32)
+        arg1 = tf.math.rsqrt(step)
+        arg2 = step * (self.warmup_steps ** -1.5)
+
+        return tf.math.rsqrt(self.d_model) * tf.math.minimum(arg1, arg2)
+
+
+learning_rate = CustomSchedule(d_model)
+#learning_rate=.01
+
+optimizer = tf.keras.optimizers.Adam(learning_rate, beta_1=0.9, beta_2=0.98, epsilon=1e-9)
+temp_learning_rate_schedule = CustomSchedule(d_model)
+
+plt.plot(temp_learning_rate_schedule(tf.range(40000, dtype=tf.float32)))
+plt.ylabel("Learning Rate")
+plt.xlabel("Train Step")
+
+
+loss_object = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction='none')
+def loss_function(real, pred):
+    mask = tf.math.logical_not(tf.math.equal(real, 0))
+    loss_ = loss_object(real, pred)
+
+    mask = tf.cast(mask, dtype=loss_.dtype)
+    loss_ *= mask
+
+    return tf.reduce_sum(loss_)/tf.reduce_sum(mask)
+
+
+def accuracy_function(real, pred):
+    accuracies = tf.equal(real, tf.argmax(pred, axis=2))
+    accuracies = tf.cast(accuracies, dtype= tf.float32)
+    mask = tf.math.logical_not(tf.math.equal(real, 0))
+    # accuracies = tf.math.logical_and(mask, accuracies)
+    accuracies = tf.cast(accuracies, dtype=tf.float32)
+    mask = tf.cast(mask, dtype=tf.float32)
+    return tf.reduce_sum(accuracies) / tf.reduce_sum(mask)
+
+train_loss = tf.keras.metrics.Mean(name='train_loss')
+train_accuracy = tf.keras.metrics.Mean(name='train_accuracy')
+
+transformer = Transformer(
+    num_layers=num_layers,
+    d_model=d_model,
+    num_heads=num_heads,
+    dff=dff,
+    input_vocab_size=ENCODER_VOCAB,
+    target_vocab_size=DECODER_VOCAB,
+    pe_input=1000,
+    pe_target=1000,
+    rate=dropout_rate)
+
+
+def create_masks(inp, tar):
+    enc_padding_mask = create_padding_mask(inp)
+    dec_padding_mask = create_padding_mask(inp)
+
+    look_ahead_mask = create_look_ahead_mask(tf.shape(tar)[1])
+    dec_target_padding_mask = create_padding_mask(tar)
+    combined_mask = tf.maximum(dec_target_padding_mask, look_ahead_mask)
+
+    return enc_padding_mask, combined_mask, dec_padding_mask
+
+# checkpoint_path = "/content/drive/MyDrive/Dataset/checkpoints"
+checkpoint_path = "checkpoints"
+ckpt = tf.train.Checkpoint(transformer=transformer, optimizer=optimizer)
+ckpt_manager = tf.train.CheckpointManager(ckpt, checkpoint_path, max_to_keep=5)
+
+if ckpt_manager.latest_checkpoint:
+    ckpt.restore(ckpt_manager.latest_checkpoint)
+    print ('Latest checkpoint restored!!')
+
+@tf.function
+def train_step(inp, tar):
+    tar_inp = tar[:, :-1]
+    tar_real = tar[:, 1:]
+
+    enc_padding_mask, combined_mask, dec_padding_mask = create_masks(inp, tar_inp)
+
+    with tf.GradientTape() as tape:
+        predictions, _ = transformer(
+            inp,
+            tar_inp,
+            training=True,
+            enc_padding_mask=enc_padding_mask,
+            look_ahead_mask=combined_mask,
+            dec_padding_mask=dec_padding_mask
+        )
+        loss = loss_function(tar_real, predictions)
+
+    gradients = tape.gradient(loss, transformer.trainable_variables)
+    optimizer.apply_gradients(zip(gradients, transformer.trainable_variables))
+    train_loss(loss)
+    train_accuracy(accuracy_function(tar_real, predictions))
+
+
+# for epoch in range(EPOCHS):
+#     start = time.time()
+#
+#     train_loss.reset_states()
+#
+#     for (batch, (inp, tar)) in enumerate(dataset):
+#         train_step(inp, tar)
+#
+#         if batch % 100 == 0:
+#             print(
+#                 f'Epoch {epoch + 1} Batch {batch} Loss {train_loss.result():.4f} Accuracy {train_accuracy.result():.4f}')
+#
+#     if (epoch + 1) % 5 == 0:
+#         ckpt_save_path = ckpt_manager.save()
+#         print('Saving checkpoint for epoch {} at {}'.format(epoch + 1, ckpt_save_path))
+#
+#     print(f'Epoch {epoch + 1} Loss {train_loss.result():.4f} Accuracy {train_accuracy.result():.4f}')
+#     print('Time taken for 1 epoch: {} secs\n'.format(time.time() - start))
+# creating embedding solving the problem of unseen number token
+
+# class NumericEmbedding(nn.Module):
+#     def __init__(self, embedding_dim=32):
+#         super().__init__()
+#         self.embedding = nn.Embedding(10, embedding_dim)  # 0-9 digits
+#         self.linear = nn.Linear(embedding_dim * 5, embedding_dim)  # 5-digit numbers
+#
+#     def forward(self, number):
+#         digits = [int(d) for d in str(number).zfill(5)]  # Pad number to 5 digits
+#         embeddings = self.embedding(torch.tensor(digits))  # Get embeddings
+#         return self.linear(embeddings.view(1, -1))  # Flatten & process
+#
+# num_encoder = NumericEmbedding()
+# print(num_encoder(34))  # Outputs a co
+
+def evaluate(input_article):
+    # Tokenize and pad the input article
+    print(input_article)
+    # inputs=input_article.apply(preprocess_and_split_numbers(input_article))
+
+    # input_article = article_tokenizer.texts_to_sequences([inputs])
+    # input_article=[[3,4,5,6,7,8,9,10,14,15,18,19,11,15,16,17,12]]
+    input_article = [[2,5,7,3,8,14,4]]
+    print("tokens")
+    print(input_article)
+
+    input_article = tf.keras.preprocessing.sequence.pad_sequences(
+        input_article, maxlen=ENCODER_LEN, padding='post', truncating='post'
+    )
+    print("Inputs")
+    print(input_article)
+    encoder_input = tf.expand_dims(input_article[0], 0)
+    print (encoder_input)
+    decoder_input = [summary_tokenizer.word_index['<sos>']]
+    output = tf.expand_dims(decoder_input, 0)
+
+    for i in range(DECODER_LEN):
+        # Create masks
+        enc_padding_mask, combined_mask, dec_padding_mask = create_masks(encoder_input, output)
+
+        # Get predictions from the transformer
+        predictions, attention_weights = transformer(
+            encoder_input,
+            output,
+            training=False,
+            enc_padding_mask=enc_padding_mask,
+            look_ahead_mask=combined_mask,
+            dec_padding_mask=dec_padding_mask
+        )
+        predictions = predictions[:, -1:, :]  # Take the last predicted token
+        predicted_id = tf.cast(tf.argmax(predictions, axis=-1), tf.int32)
+        if predicted_id == summary_tokenizer.word_index['<eos>']:
+            return tf.squeeze(output, axis=0), attention_weights
+        # Append the predicted token to the output
+        output = tf.concat([output, predicted_id], axis=-1)
+    return tf.squeeze(output, axis=0), attention_weights
+
+def summarize(input_article):
+    summarized = evaluate(input_article=input_article)[0].numpy()
+    summarized = np.expand_dims(summarized[1:], 0)  # Remove the <sos> token
+    return summary_tokenizer.sequences_to_texts(summarized)[0]
+
+# Test the function
+print('Output:')
+print(summarize(
+    '<SOS>67+99<EOS>'))
+def preprocess_and_split_numbers(input_text):
+    # Split numbers into their individual digits
+    # This regular expression finds numbers and splits them into individual characters
+    input_text = re.sub(r'(\d)', r' \1 ', input_text)  # Add space around each digit
+    return input_text
