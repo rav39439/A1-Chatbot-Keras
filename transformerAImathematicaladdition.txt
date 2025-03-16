@@ -1,3 +1,64 @@
+
+*********************mixture of experts using keras for sequential trasnsformers******************************
+
+
+class MoELayer(Layer):
+    def __init__(self, d_model, d_ff, num_experts=4, top_k=2, dropout_rate=0.1):
+        """
+        d_model: Model embedding size
+        d_ff: Hidden layer size for FFN
+        num_experts: Number of expert FFNs
+        top_k: Number of experts selected per token
+        dropout_rate: Dropout rate for regularization
+        """
+        super(MoELayer, self).__init__()
+        self.num_experts = num_experts
+        self.top_k = top_k
+
+        # Define multiple FFN experts
+        self.experts = [Dense(d_ff, activation="relu") for _ in range(num_experts)]
+        self.output_layer = Dense(d_model)  # Final projection back to d_model
+        self.dropout = Dropout(dropout_rate)
+        self.layer_norm = LayerNormalization()
+
+        # Router to decide which experts to activate
+        self.router = Dense(num_experts, activation="softmax")  # Output is routing weights
+
+    def call(self, x):
+        batch_size, seq_len, d_model = tf.shape(x)[0], tf.shape(x)[1], tf.shape(x)[2]
+
+        # Compute routing weights for each token
+        routing_logits = self.router(x)  # Shape: (batch_size, seq_len, num_experts)
+
+        # Select top-k experts based on highest routing weights
+        top_k_values, top_k_indices = tf.math.top_k(routing_logits, k=self.top_k)  # (batch_size, seq_len, top_k)
+
+        # Normalize routing weights (softmax over selected experts)
+        routing_weights = tf.nn.softmax(top_k_values, axis=-1)  # (batch_size, seq_len, top_k)
+
+        # Compute outputs from selected experts
+        expert_outputs = tf.stack([self.experts[i](x) for i in range(self.num_experts)], axis=-1)
+        # Shape: (batch_size, seq_len, d_ff, num_experts)
+
+        # Gather selected experts' outputs
+        selected_expert_outputs = tf.gather(expert_outputs, top_k_indices, batch_dims=-1, axis=-1)
+        # Shape: (batch_size, seq_len, d_ff, top_k)
+
+        # Weighted sum of top-k expert outputs
+        weighted_expert_output = tf.reduce_sum(selected_expert_outputs * tf.expand_dims(routing_weights, -2), axis=-1)
+        # Shape: (batch_size, seq_len, d_ff)
+
+        # Final projection back to d_model
+        output = self.output_layer(weighted_expert_output)
+        return self.layer_norm(x + self.dropout(output))  # Residual connection
+
+
+****************************************************************************************************************************************************
+
+
+
+
+
 # import numpy as np
 # import matplotlib.pyplot as plt
 # import seaborn as sns
