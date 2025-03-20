@@ -1,0 +1,573 @@
+#------------------------------------Learning new pretrained models----------------------------
+
+
+# from transformers import PegasusTokenizer, PegasusForConditionalGeneration
+#
+# # Load pre-trained PEGASUS model
+# tokenizer = PegasusTokenizer.from_pretrained("google/pegasus-xsum")
+# model = PegasusForConditionalGeneration.from_pretrained("google/pegasus-xsum")
+#
+# # Input text
+# text = """
+# Zerodha Founder and CEO Nithin Kamath said banks making it hard for customers to close an account is a "dark pattern" and there should be regulations on this. "SEBI mandates that all stockbrokers must provide a facility to close accounts online," Kamath said. A dark pattern is a user interface carefully crafted to trick users into doing things, he added.
+# """
+#
+# # Tokenize and generate summary
+# inputs = tokenizer(text, return_tensors="pt", max_length=512, truncation=True)
+# summary_ids = model.generate(inputs['input_ids'], max_length=150, num_beams=4, length_penalty=2.0, early_stopping=True)
+#
+# # Decode and print summary
+# summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
+# print("Summary:")
+# print(summary)
+
+
+#-----------------------------------BErt-custom-model--------------------------------
+
+#
+# from transformers import BertTokenizerFast, BertForQuestionAnswering
+#
+# tokenizer = BertTokenizerFast.from_pretrained('bert-base-uncased')
+# model = BertForQuestionAnswering.from_pretrained('bert-base-uncased')
+#
+# import pandas as pd
+#
+# # Load CSV or Excel file
+# # For CSV:
+# df = pd.read_csv('qa_dataset_cleaned.csv')
+#
+# # For Excel:
+# # df = pd.read_excel('path_to_file.xlsx')
+#
+# print(df.head())
+#
+#
+# def get_answer_start(row):
+#     context = row['context']
+#     answer = row['answer']
+#
+#     # Find the starting index of the answer in the context
+#     try:
+#         start_index = context.index(answer)
+#     except ValueError:
+#         start_index = -1
+#
+#     return start_index
+#
+#
+# # Add a new column for start index
+# df['answer_start'] = df.apply(get_answer_start, axis=1)
+# df = df[df['answer_start'] != -1]
+#
+# from datasets import Dataset
+#
+# dataset = Dataset.from_pandas(df[['context', 'question', 'answer', 'answer_start']])
+# print(dataset)
+# #
+# def preprocess(example):
+#     inputs = tokenizer(
+#         example['question'],
+#         example['context'],
+#         max_length=512,
+#         truncation=True,
+#         padding="max_length",
+#         return_offsets_mapping=True
+#     )
+#
+#     start_positions = []
+#     end_positions = []
+#
+#     # Compute token-level start and end positions
+#     for i, offset in enumerate(inputs['offset_mapping']):
+#         start_char = example['answer_start']
+#         end_char = start_char + len(example['answer'])
+#
+#         if offset[0] <= start_char and offset[1] >= start_char:
+#             start_positions.append(i)
+#         if offset[0] <= end_char and offset[1] >= end_char:
+#             end_positions.append(i)
+#
+#     if start_positions and end_positions:
+#         inputs['start_positions'] = start_positions[0]
+#         inputs['end_positions'] = end_positions[0]
+#
+#     return inputs
+#
+#
+# processed_dataset = dataset.map(preprocess)
+#
+# from transformers import TrainingArguments, Trainer
+#
+# training_args = TrainingArguments(
+#     output_dir="./qa_model",
+#     num_train_epochs=1,
+#     per_device_train_batch_size=16,
+#     per_device_eval_batch_size=8,
+#     warmup_steps=500,
+#     weight_decay=0.01,
+#     logging_dir="./logs",
+#     logging_steps=10,
+#     evaluation_strategy="steps",
+#     # fp16=True
+#
+# )
+#
+# trainer = Trainer(
+#     model=model,
+#     args=training_args,
+#     train_dataset=processed_dataset,
+# )
+#
+# trainer.train()
+#
+# model.save_pretrained("./fine-tuned-bert-qa")
+# tokenizer.save_pretrained("./fine-tuned-bert-qa")
+#
+# from transformers import pipeline
+#
+# qa_pipeline = pipeline(
+#     "question-answering",
+#     model="./fine-tuned-bert-qa",
+#     tokenizer="./fine-tuned-bert-qa"
+# )
+#
+# context = "Artificial intelligence is the simulation of human intelligence..."
+# question = "What does AI simulate?"
+#
+# result = qa_pipeline(question=question, context=context)
+# print("Answer:", result['answer'])
+
+#----------------------------------------------------------------------------------------
+
+
+#--------------------------------------T5 transformer-------------------------------------
+# import pandas as pd
+# import torch
+# from datasets import Dataset
+# from transformers import T5Tokenizer, T5ForConditionalGeneration, TrainingArguments, Trainer
+#
+# data = pd.read_csv('english_news.csv')
+#
+# # Convert to Hugging Face dataset format
+# dataset = Dataset.from_pandas(data[['Content', 'Headline']])
+#
+# tokenizer = T5Tokenizer.from_pretrained("t5-small")
+#
+# def preprocess_function(examples):
+#     inputs = ["summarize: " + doc for doc in examples["Content"]]
+#     model_inputs = tokenizer(inputs, max_length=512, truncation=True, padding="max_length")
+#
+#     labels = tokenizer(text_target=examples["Headline"], max_length=128, truncation=True, padding="max_length")
+#     model_inputs["labels"] = labels["input_ids"]
+#
+#     return model_inputs
+#
+# tokenized_dataset = dataset.map(preprocess_function, batched=True)
+# model = T5ForConditionalGeneration.from_pretrained("t5-small")
+#
+# training_args = TrainingArguments(
+#     output_dir="./results",
+#     evaluation_strategy="epoch",
+#     per_device_train_batch_size=4,
+#     per_device_eval_batch_size=4,
+#     learning_rate=2e-4,
+#     num_train_epochs=3,
+#     weight_decay=0.01,
+#     save_strategy="epoch",
+#     logging_dir="./logs",
+#     # fp16=True  # Enable mixed precision for faster training
+# )
+#
+# trainer = Trainer(
+#     model=model,
+#     args=training_args,
+#     train_dataset=tokenized_dataset,
+#     eval_dataset=tokenized_dataset
+# )
+#
+# def summarize(text):
+#     inputs = tokenizer("summarize: " + text, return_tensors="pt", max_length=512, truncation=True)
+#     input_ids = inputs["input_ids"].to(model.device)
+#
+#     output = model.generate(input_ids, max_length=128, num_beams=5, early_stopping=True)
+#     summary = tokenizer.decode(output[0], skip_special_tokens=True)
+#
+#     return summary
+#
+# # Example usage
+# text = "Another NEET aspirant died by suicide in Rajasthan's Kota on Monday, taking the number of student suicides this year to around 26. The girl was reportedly a native of UP's Mau and had been staying at a hostel in the city's Vigyan Nagar area. She was rushed to a hospital after she reportedly started vomiting, and passed away later."
+# print(summarize(text))
+#
+# model.save_pretrained("./saved_t5_model")
+# tokenizer.save_pretrained("./saved_t5_model")
+
+
+#--------load and predict--------------
+# from transformers import T5Tokenizer, T5ForConditionalGeneration
+# import torch
+#
+# # Load model and tokenizer
+# model = T5ForConditionalGeneration.from_pretrained("./saved_t5_model")
+# tokenizer = T5Tokenizer.from_pretrained("./saved_t5_model")
+#
+# # Move model to GPU (if available)
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# model.to(device)
+#
+# def summarize(text):
+#     # Prepend "summarize:" for T5 model
+#     inputs = tokenizer(
+#         "summarize: " + text,
+#         return_tensors="pt",
+#         max_length=512,
+#         truncation=True
+#     ).to(device)
+#
+#     # Generate summary
+#     output = model.generate(
+#         inputs["input_ids"],
+#         max_length=128,
+#         num_beams=5,
+#         early_stopping=True
+#     )
+#
+#     # Decode output
+#     summary = tokenizer.decode(output[0], skip_special_tokens=True)
+#
+#     return summary
+#
+# text = """
+# The Eiffel Tower, located in Paris, France, is one of the most iconic structures in the world. It was designed by Gustave Eiffel and completed in 1889 as the entrance arch to the 1889 World's Fair. Standing at 324 meters (1,063 feet) tall, it held the record as the tallest man-made structure in the world until the completion of the Chrysler Building in New York City in 1930. Today, the Eiffel Tower is a major tourist attraction, drawing over 7 million visitors each year. Its lattice structure is made of iron, and it weighs approximately 10,100 tons. The tower is repainted every seven years to prevent rust and maintain its appearance..
+# """
+#
+# summary = summarize(text)
+# print("Summary:\n", summary)
+
+#---------------------------------------------#
+
+#------------------------------------t5 transformer done -----------------------------
+
+#--------------------------------Roberta -working----------------------------------------------
+
+# import pandas as pd
+# import json
+#
+# # Load CSV data
+# df = pd.read_csv("qa_dataset_cleaned.csv")  # CSV should have 'title', 'context', 'question', 'answer'
+#
+# data = []
+# for idx, row in df.iterrows():
+#     data.append({
+#         "title": row['title'],  # Using the title from the CSV
+#         "paragraphs": [{
+#             "context": row['context'],
+#             "qas": [{
+#                 "id": str(idx),
+#                 "question": row['question'],
+#                 "answers": [{
+#                     "text": row['answer'],
+#                     "answer_start": row['context'].find(row['answer'])
+#                 }],
+#                 "is_impossible": False  # Required for SQuAD format
+#             }]
+#         }]
+#     })
+#
+# # Convert to JSON format
+# dataset = {"data": data}
+#
+# # Save to file
+# with open('custom_qa.json', 'w') as f:
+#     json.dump(dataset, f, indent=4)
+#
+# # Load the dataset with Hugging Face
+# from transformers import AutoTokenizer, AutoModelForQuestionAnswering, TrainingArguments, Trainer
+# from datasets import load_dataset
+#
+# # Load custom dataset
+# data_files = {"train": "custom_qa.json"}
+# dataset = load_dataset('json', data_files=data_files, field='data')
+#
+# print(dataset)
+#
+# # Load RoBERTa tokenizer and model
+# tokenizer = AutoTokenizer.from_pretrained("deepset/roberta-base-squad2")
+# model = AutoModelForQuestionAnswering.from_pretrained("deepset/roberta-base-squad2")
+#
+#
+# def preprocess_function(examples):
+#     questions = [l["question"] for p in data for q in p["paragraphs"] for l in q['qas']]
+#     contexts = [q["context"] for p in data for q in p["paragraphs"]]
+#     answers = [l["answers"][0]["text"] for p in data for q in p["paragraphs"] for l in q['qas']]
+#     answer_starts = [l["answers"][0]["answer_start"] for p in data for q in p["paragraphs"] for l in q['qas']]
+#
+#     # Tokenization with padding and truncation
+#     tokenized_examples = tokenizer(
+#         questions,
+#         contexts,
+#         truncation=True,
+#         padding="max_length",      # ✅ Ensures uniform tensor size
+#         max_length=512,
+#         return_tensors="pt"
+#     )
+#
+#     start_positions = []
+#     end_positions = []
+#
+#     for i, answer in enumerate(answers):
+#         start = answer_starts[i]
+#         if start != -1:   # ✅ Avoid negative starting positions
+#             start_token_pos = tokenized_examples.char_to_token(i, start)
+#             end_token_pos = tokenized_examples.char_to_token(i, start + len(answer) - 1)
+#
+#             # Handle cases where char_to_token returns None
+#             if start_token_pos is None:
+#                 start_token_pos = tokenizer.model_max_length  # Default to max length if token position is missing
+#             if end_token_pos is None:
+#                 end_token_pos = tokenizer.model_max_length
+#
+#             start_positions.append(int(start_token_pos))
+#             end_positions.append(int(end_token_pos))
+#         else:
+#             # Handle cases where answer is not found in context
+#             start_positions.append(0)
+#             end_positions.append(0)
+#
+#     tokenized_examples["start_positions"] = start_positions
+#     tokenized_examples["end_positions"] = end_positions
+#
+#     return tokenized_examples
+# tokenized_dataset = dataset.map(preprocess_function, batched=True, remove_columns=dataset['train'].column_names)
+#
+# # Training arguments
+# training_args = TrainingArguments(
+#     output_dir="./results",
+#     num_train_epochs=1,
+#     per_device_train_batch_size=8,
+#     save_steps=10,
+#     save_total_limit=2,
+#     logging_dir='./logs',
+#     logging_steps=10
+# )
+#
+# # Trainer
+# trainer = Trainer(
+#     model=model,
+#     args=training_args,
+#     train_dataset=tokenized_dataset["train"],
+#     tokenizer=tokenizer
+# )
+#
+# # Train the model
+# trainer.train()
+#
+# model.save_pretrained("./custom-roberta-qa")
+# tokenizer.save_pretrained("./custom-roberta-qa")
+#
+# from transformers import pipeline, AutoTokenizer, AutoModelForQuestionAnswering
+#
+# # Load fine-tuned model
+# tokenizer = AutoTokenizer.from_pretrained("./custom-roberta-qa")
+# model = AutoModelForQuestionAnswering.from_pretrained("./custom-roberta-qa")
+#
+# # Create QA pipeline
+# qa_pipeline = pipeline("question-answering", model=model, tokenizer=tokenizer)
+#
+# # Example prediction
+# context = "The Eiffel Tower was designed by Gustave Eiffel in 1889."
+# question = "Who designed the Eiffel Tower?"
+#
+# result = qa_pipeline(question=question, context=context)
+# print(result)
+
+#-------------------------------------------------------------------------------
+
+
+#_----------------------------Bart for ttext-summerizer working--------------------------
+
+#
+# import pandas as pd
+# from datasets import Dataset
+#
+# # Load data
+# df = pd.read_csv('english_news_dataset1.csv')
+#
+# # Convert to Dataset format
+# dataset = Dataset.from_pandas(df)
+# dataset = dataset.train_test_split(test_size=0.2)
+#
+# train_dataset = dataset['train']
+# test_dataset = dataset['test']
+#
+#
+# from transformers import BartTokenizer, BartForConditionalGeneration
+#
+# # Load tokenizer and model
+# tokenizer = BartTokenizer.from_pretrained('facebook/bart-large-cnn')
+# model = BartForConditionalGeneration.from_pretrained('facebook/bart-large-cnn')
+#
+#
+# max_input_length = 1024
+# max_target_length = 128
+#
+# def preprocess_function(examples):
+#     inputs = tokenizer(examples["Content"], max_length=max_input_length, truncation=True)
+#     labels = tokenizer(examples["Headline"], max_length=max_target_length, truncation=True)
+#     inputs["labels"] = labels["input_ids"]
+#     return inputs
+#
+# train_dataset = train_dataset.map(preprocess_function, batched=True)
+# test_dataset = test_dataset.map(preprocess_function, batched=True)
+#
+# from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments
+#
+# from transformers import TrainingArguments
+#
+# training_args = Seq2SeqTrainingArguments(
+#     output_dir="./bart-summarization",
+#     evaluation_strategy="epoch",
+#     learning_rate=2e-5,
+#     per_device_train_batch_size=8,
+#     per_device_eval_batch_size=8,
+#     weight_decay=0.01,
+#     save_total_limit=2,
+#     num_train_epochs=3,
+#     predict_with_generate=True,
+#     logging_dir='./logs',
+#     logging_steps=10,
+#     # fp16=True  # For faster training on GPU
+# )
+#
+# from transformers import Trainer
+#
+# # trainer = Seq2SeqTrainer(
+# #     model=model,
+# #     args=training_args,
+# #     train_dataset=train_dataset,
+# #     eval_dataset=test_dataset
+# # )
+#
+# from transformers import DataCollatorForSeq2Seq
+#
+# data_collator = DataCollatorForSeq2Seq(
+#     tokenizer=tokenizer,
+#     model=model,
+#     padding=True,  # ✅ Pads to the longest sequence in the batch
+#     max_length=128,  # ✅ Set maximum sequence length
+#     return_tensors="pt"
+# )
+#
+# trainer = Seq2SeqTrainer(
+#     model=model,
+#     args=training_args,
+#     train_dataset=train_dataset,
+#     eval_dataset=test_dataset,
+#     data_collator=data_collator
+# )
+#
+# trainer.train()
+#
+# model.save_pretrained("./bart-custom-summarizer")
+# tokenizer.save_pretrained("./bart-custom-summarizer")
+#------------------------------------------------------------------------------------------
+
+#------------------------------ T5 summerizer for context ,questions and asnwers-----------------
+
+
+# import pandas as pd
+# import torch
+# from transformers import T5Tokenizer, T5ForConditionalGeneration, TrainingArguments, Trainer
+# from datasets import Dataset
+#
+# # ✅ Load data from CSV file
+# file_path = "qa_dataset.csv"
+# df = pd.read_csv(file_path)
+#
+# # ✅ Convert the DataFrame to a Dataset
+# dataset = Dataset.from_pandas(df)
+#
+# # ✅ Load the tokenizer
+# tokenizer = T5Tokenizer.from_pretrained('t5-small')
+# print(df.head())
+#
+#
+# # ✅ Preprocessing function
+# def preprocess_function(examples):
+#     inputs = [f"question: {q} context: {c}" for q, c in zip(examples['question'], examples['context'])]
+#     model_inputs = tokenizer(
+#         inputs,
+#         max_length=512,  # Input max length
+#         truncation=True,
+#         padding="max_length"
+#     )
+#
+#     # Tokenize answers as labels
+#     labels = tokenizer(
+#         examples['answer'],
+#         max_length=128,  # Label max length
+#         truncation=True,
+#         padding="max_length"
+#     )
+#
+#     model_inputs['labels'] = labels['input_ids']
+#     return model_inputs
+#
+#
+# # ✅ Apply preprocessing
+# tokenized_data = dataset.map(preprocess_function, batched=True)
+#
+# # ✅ Split into train and validation sets
+# train_dataset = tokenized_data.train_test_split(test_size=0.1)['train']
+# eval_dataset = tokenized_data.train_test_split(test_size=0.1)['test']
+#
+# # ✅ Load T5 model
+# model = T5ForConditionalGeneration.from_pretrained('t5-small')
+#
+# # ✅ Define training arguments
+# training_args = TrainingArguments(
+#     output_dir="./t5-qa",
+#     evaluation_strategy="epoch",
+#     save_strategy="epoch",
+#     learning_rate=2e-5,
+#     per_device_train_batch_size=8,
+#     per_device_eval_batch_size=8,
+#     num_train_epochs=3,
+#     weight_decay=0.01,
+#     logging_dir="./logs",
+#     save_total_limit=2,
+#     load_best_model_at_end=True,
+#     # fp16=True  # Mixed precision for faster training
+# )
+#
+# # ✅ Create Trainer
+# trainer = Trainer(
+#     model=model,
+#     args=training_args,
+#     train_dataset=train_dataset,
+#     eval_dataset=eval_dataset
+# )
+#
+# # ✅ Start Training
+# trainer.train()
+#
+# # ✅ Save Model
+# model.save_pretrained("./custom-t5-qa")
+# tokenizer.save_pretrained("./custom-t5-qa")
+#
+# from transformers import T5Tokenizer, T5ForConditionalGeneration
+#
+# tokenizer = T5Tokenizer.from_pretrained('./custom-t5-qa')
+# model = T5ForConditionalGeneration.from_pretrained('./custom-t5-qa')
+#
+# # Example question + context
+# input_text = "question: What is the capital of France? context: France is a country in Europe. Its capital is Paris."
+# input_ids = tokenizer(input_text, return_tensors="pt").input_ids
+#
+# # Generate answer
+# outputs = model.generate(input_ids)
+# answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
+#
+# print(f"Predicted answer: {answer}")
+
+
+#--------------------------------------------------------------------------
