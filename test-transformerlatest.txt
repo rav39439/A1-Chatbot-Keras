@@ -1,3 +1,172 @@
+bart hugging face finetune continual learning working :
+huggingfacelink:https://discuss.huggingface.co/t/correct-way-to-save-load-adapters-and-checkpoints-in-peft/77836/2
+
+
+
+import json
+import os
+import torch
+from torch.utils.data import Dataset, DataLoader
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForCausalLM
+from torch.optim import AdamW
+from peft import get_peft_model, PeftConfig, PeftModel, LoraConfig, TaskType
+
+# Config
+model_id = "facebook/bart-base"
+lora_dir = "./merged_bart_model"
+MAX_LENGTH = 512
+BATCH_SIZE = 4
+NUM_EPOCHS = 3
+LEARNING_RATE = 3e-4
+
+# Load raw dataset from JSON
+with open("profit_loss_part_1_part_1_subpart_2.json", "r") as f:
+    raw_data = json.load(f)
+
+# Load tokenizer (base tokenizer)
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+# Tokenization function for seq2seq
+def tokenize_example(example):
+    inputs = tokenizer(
+        example["input"],
+        max_length=MAX_LENGTH,
+        truncation=True,
+        padding="max_length",
+    )
+    targets = tokenizer(
+        example["output"],
+        max_length=MAX_LENGTH,
+        truncation=True,
+        padding="max_length"
+    )
+    inputs["labels"] = targets["input_ids"]
+    return inputs
+
+# Tokenize dataset
+tokenized_data = [tokenize_example(ex) for ex in raw_data]
+
+# Dataset class
+class ProfitLossDataset(Dataset):
+    def __init__(self, tokenized_data):
+        self.data = tokenized_data
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        item = {k: torch.tensor(v) for k, v in self.data[idx].items()}
+        return item
+
+train_dataset = ProfitLossDataset(tokenized_data)
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+
+model_path = "./merged_bart_model"
+
+# model = AutoModelForSeq2SeqLM.from_pretrained(model_path)
+# tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+config = PeftConfig.from_pretrained("./lora_finetuned_bart")
+model = AutoModelForSeq2SeqLM.from_pretrained("facebook/bart-base")
+model = PeftModel.from_pretrained(model,
+"./lora_finetuned_bart",
+ is_trainable=True # 👈 here
+)
+# check if it's working
+model.print_trainable_parameters()
+# base_model = AutoModelForSeq2SeqLM.from_pretrained("facebook/bart-base")
+# model = PeftModel.from_pretrained(base_model, "./lora_finetuned_bart")
+# tokenizer = AutoTokenizer.from_pretrained("./lora_finetuned_bart")
+# Move to device
+
+# Load base model
+# base_model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
+#
+# # Setup LoRA config (must match your original LoRA setup)
+# peft_config = LoraConfig(
+#     r=8,
+#     lora_alpha=32,
+#     target_modules=["q_proj", "v_proj", "k_proj", "out_proj"],
+#     lora_dropout=0.05,
+#     task_type=TaskType.SEQ_2_SEQ_LM,
+# )
+#
+# # Attach LoRA to base model
+# model = get_peft_model(base_model, peft_config)
+#
+# # Load saved LoRA adapter weights into the model
+# model = PeftModel.from_pretrained(model, lora_dir)
+#
+# # Verify trainable params
+# model.print_trainable_parameters()
+
+# Move model to device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
+
+# Optimizer
+optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
+
+# Training loop
+model.train()
+for epoch in range(NUM_EPOCHS):
+    for batch_idx, batch in enumerate(train_loader):
+        batch = {k: v.to(device) for k, v in batch.items()}
+        outputs = model(**batch)
+        loss = outputs.loss
+
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+        if batch_idx % 10 == 0:
+            print(f"Epoch {epoch+1}, Batch {batch_idx}, Loss: {loss.item():.4f}")
+
+    print(f"Epoch {epoch+1} completed.")
+
+# Save updated LoRA model and tokenizer
+os.makedirs(lora_dir + "_updated", exist_ok=True)
+model.save_pretrained(lora_dir + "_updated")
+tokenizer.save_pretrained(lora_dir + "_updated")
+
+# Inference test
+model.eval()
+test_question = "A man buys a phone for $800 and sells it for $1000. What is the profit percentage?"
+inputs = tokenizer(test_question, return_tensors="pt", max_length=MAX_LENGTH, truncation=True).to(device)
+generated_ids = model.generate(**inputs, max_new_tokens=100)
+print("Generated answer:", tokenizer.decode(generated_ids[0], skip_special_tokens=True))
+
+
+def print_hi(name):
+    print(f'Hi, {name}')
+
+if __name__ == '__main__':
+    print_hi('PyCharm')
+
+
+def print_hi(name):
+    # Use a breakpoint in the code line below to debug your script.
+    print(f'Hi, {name}')  # Press Ctrl+F8 to toggle the breakpoint.
+
+
+# Press the green button in the gutter to run the script.
+if __name__ == '__main__':
+    print_hi('PyCharm')
+
+# See PyCharm help at https://www.jetbrains.com/help/pycharm/
+
+
+
+
+#---------------------------------------------------------------------xxxxxxxxxxxxxxxxxxx---------------------------------------
+
+
+
+
+
+
+
+
 import numpy as np
 # import matplotlib.pyplot as plt
 # import seaborn as sns
