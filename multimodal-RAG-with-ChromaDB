@@ -101,37 +101,54 @@ def embed_content(inputs):
 
     return all_results
 
-# --- PDF Processing ---
+
 def process_pdf(file_path, ocr=False):
     contents = []
     metadata = []
 
-    # 1) Extract digital text
-    text = extract_text(file_path)
-    for idx, chunk in enumerate(chunk_text(text)):
-        contents.append({"type": "text", "data": chunk})
-        metadata.append({"source": file_path, "chunk": idx, "type": "text"})
+    # 1) Extract digital text with pdfminer
+    try:
+        text = extract_text(file_path)
+        if text:
+            for idx, chunk in enumerate(chunk_text(text)):
+                contents.append({"type": "text", "data": chunk})
+                metadata.append({
+                    "source": file_path,
+                    "chunk": idx,
+                    "type": "text"
+                })
+    except Exception as e:
+        print(f"Text extraction error: {e}")
 
     # 2) Extract tables via Camelot
     try:
-        tables = camelot.read_pdf(file_path, pages="all")
+        # tables = camelot.read_pdf(file_path, pages="all")
+        tables = camelot.read_pdf(file_path, pages="all", backend="poppler")
+
         for idx, table in enumerate(tables):
             table_text = table.df.to_string()
             contents.append({"type": "text", "data": table_text})
-            metadata.append({"source": file_path, "chunk": idx, "type": "table"})
+            metadata.append({
+                "source": file_path,
+                "chunk": f"table_{idx}",
+                "type": "table"
+            })
     except Exception as e:
         print(f"No tables found or Camelot error: {e}")
 
-    # 3) Extract images from PDF pages using PyMuPDF
     try:
         doc = fitz.open(file_path)
         for idx, page in enumerate(doc):
             pix = page.get_pixmap()  # Render page as image
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            contents.append({"type": "image", "data": img})
-            metadata.append({"source": file_path, "chunk": idx, "type": "image"})
 
-            # Optional OCR on page images
+            contents.append({"type": "image", "data": img})
+            metadata.append({
+                "source": file_path,
+                "chunk": idx,
+                "type": "image"
+            })
+
             if ocr:
                 ocr_text = pytesseract.image_to_string(img)
                 if ocr_text.strip():
@@ -142,6 +159,7 @@ def process_pdf(file_path, ocr=False):
                             "chunk": f"{idx}_ocr_{o_idx}",
                             "type": "ocr_image"
                         })
+        doc.close()  # ✅ IMPORTANT: close file handle
     except Exception as e:
         print(f"PDF image extraction/OCR error: {e}")
 
@@ -244,7 +262,7 @@ def load_index(index_path="faiss.index", meta_path="meta.json"):
     with open(meta_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
     return index, meta
-
+#---------------------------faiss------------------------
 # def query_index(query_emb, k=5, index_path="faiss1.index", meta_path="meta1.json"):
 #     index, meta = load_index(index_path, meta_path)
 #     q = np.array(query_emb, dtype="float32").reshape(1, -1)
@@ -260,13 +278,28 @@ def load_index(index_path="faiss.index", meta_path="meta.json"):
 #             "meta": meta[idx]["meta"]
 #         })
 #     return results
-
+#-------------------------------------------------------------
 def get_embedding_from_item(item):
     """Convert 'embedding_b64' from embed_content to numpy array."""
     emb_b64 = item["embedding_b64"]
     dim = len(base64.b64decode(emb_b64)) // 4  # float32 = 4 bytes
     emb = np.frombuffer(base64.b64decode(emb_b64), dtype=np.float32).reshape(dim,)
     return emb
+
+def format_results_as_context(results):
+    context = "🔍 Query Results:\n"
+    context += "Best query result:\n"
+    context += f"{results['documents'][0]}\n\n"
+
+    for i, doc in enumerate(results["documents"][0]):
+        meta = results["metadatas"][0][i]
+        context += f"Result {i + 1}:\n"
+        context += f"  Document: {doc}\n"
+        context += f"  Metadata: {meta}\n\n"
+
+    return context
+
+
 
 def query_index(query_emb, k=5, index_path="faiss.index", meta_path="meta.json"):
     """
@@ -313,20 +346,94 @@ def query_index(query_emb, k=5, index_path="faiss.index", meta_path="meta.json")
         })
 
     return results
-# --- Example Usage ---
-if __name__ == "__main__":
-    pdf_files = glob.glob("data/*.pdf")
-    all_contents, all_metadata = [], []
+import atexit, shutil, tempfile, os
+import asyncio
 
-    for pdf in pdf_files:
-        contents, metadata = process_pdf(pdf, ocr=True)  # OCR optional
-        all_contents.extend(contents)
-        all_metadata.extend(metadata)
+def safe_rmtree(path, ignore_errors=True):
+    try:
+        shutil.rmtree(path, ignore_errors=ignore_errors)
+    except PermissionError:
+        pass
 
 
-    store_embeddings_in_chromadb(all_contents, all_metadata)
+async def chat(question,results):
+    USE_GEMINI = os.getenv("USE_GEMINI", "False").lower() == "true"
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+    GEMINI_LLM = os.getenv("GEMINI_LLM", "gemini-1.5-flash")  # Change as you like (e.g., gemini-1.5-pro-latest)
+
+    if USE_GEMINI and GEMINI_API_KEY:
+        genai.configure(api_key=GEMINI_API_KEY)
+        # Initialize the Gemini model
+        # For chat-like interactions, we generally use the GenerativeModel class
+        gemini_model = genai.GenerativeModel(GEMINI_LLM)
+    else:
+        print("No model available")
+
+    PROMPT_TEMPLATE = """
+       You are a helpful assistant. Use the following context passages to answer the user question.
+       If the information is not present in the context, say you don't know.
+
+       CONTEXT:
+       {context}
+
+       USER QUESTION:
+       {question}
+
+       Provide a concise, referenced answer. If referencing a source, include the filename from metadata.
+       """
+
+    # q_emb = embed_texts(question)[0]
+    # 2) retrieve top k passages
+    # results = query_index(q_emb, k=5)
+    # context = "\n---\n".join([r["text"] + f"\n[source: {r['meta'].get('doc', 'unknown')}]"
+    #                           for r in results])
+    context = format_results_as_context(results)
+
+    prompt = PROMPT_TEMPLATE.format(context=context, question=question)
+
+    if USE_GEMINI and GEMINI_API_KEY:  # Assuming these flags/vars are defined
+        try:
+            resp = gemini_model.generate_content(
+                contents=[{"role": "user", "parts": [prompt]}],
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.0,
+                    max_output_tokens=512  # Equivalent to OpenAI's max_tokens
+                )
+            )
+            # Access the generated text from the response
+            answer = resp.candidates[0].content.parts[0].text
+        except Exception as e:
+            answer = f"Error calling Gemini LLM: {e}"
+            print(f"Error calling Gemini LLM: {e}")
+    else:  # Keep the OpenAI part for fallback if needed
+        # Make sure 'openai' library is imported if this branch is active
+
+        print("No LLM configured")
+
+    # return with sources
+    print("result")
+    return({"answer": answer, "sources": results})
+
+
+
+
+async def main():
+    #-------------chromadb----------------
+
+    # pdf_files = glob.glob("data/*.pdf")
+    # all_contents, all_metadata = [], []
+    #
+    # for pdf in pdf_files:
+    #     contents, metadata = process_pdf(pdf, ocr=True)  # OCR optional
+    #     all_contents.extend(contents)
+    #     all_metadata.extend(metadata)
+    #
+    #
+    # store_embeddings_in_chromadb(all_contents, all_metadata)
+
+    #----------------------------------------------------------
     # Example query
-    query_text = "what is start date of Raman awards?"
+    query_text = "what are the key medium of logistics that are mentioned in the document?"
 
     # Encode query text into embedding
     query_emb = _clip_model.encode([query_text], convert_to_numpy=True)[0].tolist()
@@ -338,13 +445,20 @@ if __name__ == "__main__":
         include=["documents", "metadatas"]
     )
 
-    print("🔍 Query Results:")
-    for i, doc in enumerate(results["documents"][0]):
-        meta = results["metadatas"][0][i]
-        print(f"Result {i + 1}:")
-        print(f"  Document: {doc}")
-        print(f"  Metadata: {meta}")
+    # print("🔍 Query Results:")
+    # print("Best query result")
+    # print(results["documents"][0])
 
+    # Call your async chat function
+    response = await chat(query_text, results)
+
+    print("Answer:", response["answer"])
+    print("Sources:", response["sources"])
+
+    # Cleanup temp directories safely
+    atexit.unregister(shutil.rmtree)
+    atexit.register(lambda: safe_rmtree(tempfile.gettempdir()))
+    # --------------------------faiss-----------------
     # query_text = "Mention the details of RYSI Award"
     # query_results = embed_content([{"type": "text", "data": query_text}])
     # query_emb = get_embedding_from_item(query_results[0])  # numeric embedding
@@ -352,16 +466,14 @@ if __name__ == "__main__":
     # query = "yellow flower with petals"
     # query_emb = _clip_model.encode([query], convert_to_numpy=True)[0].tolist()
     #
-    # results = collection.query(
-    #     query_embeddings=[query_emb],
-    #     n_results=5,
-    #     include=["documents", "metadatas"]
-    # )
-    #
-    # print(results)
-    #
     # for r in results:
-    #     print(f"Score: {r['score']}, Type: {r['type']}, Source: {r['meta']['source']}")
+    #       print(f"Score: {r['score']}, Type: {r['type']}, Source: {r['meta']['source']}")
+
+    # -----------------------------------------------------
 
 
+# --- Example Usage ---
+if __name__ == "__main__":
+    asyncio.run(main())
 
+    # Example query
