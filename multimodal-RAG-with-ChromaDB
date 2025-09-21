@@ -1,0 +1,367 @@
+import os
+import glob
+import json
+import numpy as np
+from PIL import Image
+import fitz  # PyMuPDF
+from pdfminer.high_level import extract_text
+import camelot
+import pytesseract
+from sentence_transformers import SentenceTransformer
+import faiss
+from dotenv import load_dotenv
+import google.generativeai as genai
+
+load_dotenv()
+
+USE_GEMINI = os.getenv("USE_GEMINI", "False").lower() == "true"
+
+# --- Models ---
+_clip_model = SentenceTransformer("clip-ViT-B-32")  # for images
+
+if not USE_GEMINI:
+    _text_model = SentenceTransformer("all-MiniLM-L6-v2")  # for text & tables
+    _clip_model = SentenceTransformer("clip-ViT-B-32")     # for images
+else:
+    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+# --- Helpers ---
+def chunk_text(text, size=500, overlap=50):
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = min(start + size, len(text))
+        chunks.append(text[start:end])
+        start += size - overlap
+    return chunks
+
+
+import numpy as np
+# import genai # Assuming this is your Gemini API library
+# You'd need a multimodal model here
+# Let's assume you have a model that embeds both text and images to the same dimension
+# from your_library import multimodal_model
+
+import base64
+import io
+
+def array_to_base64(arr: np.ndarray) -> str:
+    """Convert numpy array (embedding) to base64 string."""
+    return base64.b64encode(arr.astype(np.float32).tobytes()).decode("utf-8")
+
+def base64_to_array(b64_str: str, dim: int) -> np.ndarray:
+    """Convert base64 string back to numpy array of given dimension."""
+    raw = base64.b64decode(b64_str.encode("utf-8"))
+    return np.frombuffer(raw, dtype=np.float32).reshape(dim,)
+
+def image_to_base64(img: Image.Image) -> str:
+    """Convert PIL image to base64 string."""
+    buffered = io.BytesIO()
+    img.save(buffered, format="PNG")
+    return base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+def base64_to_image(b64_str: str) -> Image.Image:
+    """Convert base64 string back to PIL image."""
+    return Image.open(io.BytesIO(base64.b64decode(b64_str)))
+
+# --- main embedding function ---
+def embed_content(inputs):
+    """
+    Generate embeddings for text and images, storing both raw content and embeddings.
+    - Text is stored as plain string.
+    - Image is stored as base64 string.
+    - Both embeddings are stored as base64 strings.
+    """
+    all_results = []
+
+    for item in inputs:
+        if item["type"] == "text":
+            emb = _clip_model.encode([item["data"]], convert_to_numpy=True)[0]  # (dim,)
+            emb_b64 = array_to_base64(emb)
+            all_results.append({
+                "type": "text",
+                "content": item["data"],   # raw text
+                "embedding_b64": emb_b64
+            })
+
+        elif item["type"] == "image":
+            img: Image.Image = item["data"]
+
+            # store raw image as base64
+            img_b64 = image_to_base64(img)
+
+            # get image embedding
+            emb = _clip_model.encode([img], convert_to_numpy=True)[0]
+            emb_b64 = array_to_base64(emb)
+
+            all_results.append({
+                "type": "image",
+                "content_b64": img_b64,   # raw image
+                "embedding_b64": emb_b64
+            })
+
+    return all_results
+
+# --- PDF Processing ---
+def process_pdf(file_path, ocr=False):
+    contents = []
+    metadata = []
+
+    # 1) Extract digital text
+    text = extract_text(file_path)
+    for idx, chunk in enumerate(chunk_text(text)):
+        contents.append({"type": "text", "data": chunk})
+        metadata.append({"source": file_path, "chunk": idx, "type": "text"})
+
+    # 2) Extract tables via Camelot
+    try:
+        tables = camelot.read_pdf(file_path, pages="all")
+        for idx, table in enumerate(tables):
+            table_text = table.df.to_string()
+            contents.append({"type": "text", "data": table_text})
+            metadata.append({"source": file_path, "chunk": idx, "type": "table"})
+    except Exception as e:
+        print(f"No tables found or Camelot error: {e}")
+
+    # 3) Extract images from PDF pages using PyMuPDF
+    try:
+        doc = fitz.open(file_path)
+        for idx, page in enumerate(doc):
+            pix = page.get_pixmap()  # Render page as image
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            contents.append({"type": "image", "data": img})
+            metadata.append({"source": file_path, "chunk": idx, "type": "image"})
+
+            # Optional OCR on page images
+            if ocr:
+                ocr_text = pytesseract.image_to_string(img)
+                if ocr_text.strip():
+                    for o_idx, chunk in enumerate(chunk_text(ocr_text)):
+                        contents.append({"type": "text", "data": chunk})
+                        metadata.append({
+                            "source": file_path,
+                            "chunk": f"{idx}_ocr_{o_idx}",
+                            "type": "ocr_image"
+                        })
+    except Exception as e:
+        print(f"PDF image extraction/OCR error: {e}")
+
+    return contents, metadata
+
+
+# def build_faiss_index(contents, metadata, index_path="faiss1.index", meta_path="meta1.json"):
+#     """
+#     Build FAISS index from embedded content.
+#     - contents: list of dicts, each must have 'embedding_b64'
+#     - metadata: list of metadata dicts for each content
+#     """
+#     xb_list = []
+#     dims = []
+#     embeddings = embed_content(contents)
+#
+#     for i, c in enumerate(embeddings):
+#         if "embedding_b64" not in c:
+#             raise KeyError(f"Item at index {i} is missing 'embedding_b64'. Did you run embed_content first?")
+#
+#         emb_b64 = c["embedding_b64"]
+#         dim = len(base64.b64decode(emb_b64)) // 4  # float32 = 4 bytes
+#         emb = base64_to_array(emb_b64, dim)
+#         xb_list.append(emb)
+#         dims.append(dim)
+#
+#     # Ensure all embeddings have same dimension
+#     if len(set(dims)) != 1:
+#         raise ValueError(f"Embeddings have inconsistent dimensions: {set(dims)}")
+#     d = dims[0]
+#
+#     # Build FAISS index
+#     xb = np.stack(xb_list).astype("float32")
+#     faiss.normalize_L2(xb)
+#     index = faiss.IndexFlatIP(d)
+#     index.add(xb)
+#     faiss.write_index(index, index_path)
+#
+#     # Save metadata
+#     meta = [
+#         {
+#             "meta": m,
+#             "type": c.get("type", "unknown"),
+#             "content": c.get("content", c.get("content_b64", ""))
+#         }
+#         for c, m in zip(contents, metadata)
+#     ]
+#     with open(meta_path, "w", encoding="utf-8") as f:
+#         json.dump(meta, f, ensure_ascii=False)
+#
+#     print(f"FAISS index built with {len(contents)} items!")
+import chromadb
+
+def base64_to_array1(b64_str):
+    """Convert base64 string back to numpy float array."""
+
+    arr = np.frombuffer(base64.b64decode(b64_str), dtype=np.float32)
+    return arr.tolist()  # convert to list for chromadb
+
+# === Setup ChromaDB ===
+chroma_client = chromadb.PersistentClient(path="./data/multimodal.db")
+collection = chroma_client.get_or_create_collection(name="multimodal_collection")
+
+# === Convert embed_content results into ChromaDB format ===
+def store_embeddings_in_chromadb(contents, metadata):
+    ids, embeddings, documents, metadatas = [], [], [], []
+    all_results = embed_content(contents)
+
+    for idx, item in enumerate(all_results):
+        item_id = f"item_{idx}"
+
+        # Decode embedding from base64
+        emb = base64_to_array1(item["embedding_b64"])
+
+        if item["type"] == "text":
+            documents.append(item["content"])  # store raw text
+            metadatas.append({"type": "text"})
+        else:  # image
+            documents.append(None)  # no plain text for images
+            metadatas.append({
+                "type": "image",
+                "content_b64": item["content_b64"]  # store raw image
+            })
+
+        ids.append(item_id)
+        embeddings.append(emb)
+
+    # Add to ChromaDB
+    collection.add(
+        ids=ids,
+        embeddings=embeddings,
+        documents=documents,
+        metadatas=metadatas
+    )
+    print(f"✅ Stored {len(ids)} items in multimodal_collection")
+
+# --- Query ---
+def load_index(index_path="faiss.index", meta_path="meta.json"):
+    index = faiss.read_index(index_path)
+    with open(meta_path, "r", encoding="utf-8") as f:
+        meta = json.load(f)
+    return index, meta
+
+# def query_index(query_emb, k=5, index_path="faiss1.index", meta_path="meta1.json"):
+#     index, meta = load_index(index_path, meta_path)
+#     q = np.array(query_emb, dtype="float32").reshape(1, -1)
+#     faiss.normalize_L2(q)
+#     D, I = index.search(q, k)
+#     results = []
+#     for score, idx in zip(D[0], I[0]):
+#         if idx < 0: continue
+#         results.append({
+#             "score": float(score),
+#             "type": meta[idx]["type"],
+#             "content": meta[idx]["text"],
+#             "meta": meta[idx]["meta"]
+#         })
+#     return results
+
+def get_embedding_from_item(item):
+    """Convert 'embedding_b64' from embed_content to numpy array."""
+    emb_b64 = item["embedding_b64"]
+    dim = len(base64.b64decode(emb_b64)) // 4  # float32 = 4 bytes
+    emb = np.frombuffer(base64.b64decode(emb_b64), dtype=np.float32).reshape(dim,)
+    return emb
+
+def query_index(query_emb, k=5, index_path="faiss.index", meta_path="meta.json"):
+    """
+    query_emb: list or np.ndarray of shape (embedding_dim,)
+    """
+    # Convert to numpy array safely
+    try:
+        q = np.array(query_emb, dtype="float32").reshape(1, -1)
+    except Exception as e:
+        raise TypeError(f"query_emb must be a numeric array. Got {type(query_emb)}") from e
+
+    faiss.normalize_L2(q)
+    index, meta = load_index(index_path, meta_path)
+    D, I = index.search(q, k)
+
+    results = []
+    for score, idx in zip(D[0], I[0]):
+        if idx < 0:
+            continue
+        try:
+            score = float(score)
+        except:
+            score = 0.0
+
+        item_meta = meta[idx]
+        content_type = item_meta.get("type", "unknown")
+
+        if content_type == "text":
+            content = item_meta.get("content", "")
+        elif content_type == "image":
+            content_b64 = item_meta.get("content", "")
+            try:
+                content = base64_to_image(content_b64)
+            except:
+                content = content_b64
+        else:
+            content = item_meta.get("content", "")
+
+        results.append({
+            "score": score,
+            "type": content_type,
+            "content": content,
+            "meta": item_meta.get("meta", {})
+        })
+
+    return results
+# --- Example Usage ---
+if __name__ == "__main__":
+    pdf_files = glob.glob("data/*.pdf")
+    all_contents, all_metadata = [], []
+
+    for pdf in pdf_files:
+        contents, metadata = process_pdf(pdf, ocr=True)  # OCR optional
+        all_contents.extend(contents)
+        all_metadata.extend(metadata)
+
+
+    store_embeddings_in_chromadb(all_contents, all_metadata)
+    # Example query
+    query_text = "what is start date of Raman awards?"
+
+    # Encode query text into embedding
+    query_emb = _clip_model.encode([query_text], convert_to_numpy=True)[0].tolist()
+
+    # Query the ChromaDB collection
+    results = collection.query(
+        query_embeddings=[query_emb],
+        n_results=5,
+        include=["documents", "metadatas"]
+    )
+
+    print("🔍 Query Results:")
+    for i, doc in enumerate(results["documents"][0]):
+        meta = results["metadatas"][0][i]
+        print(f"Result {i + 1}:")
+        print(f"  Document: {doc}")
+        print(f"  Metadata: {meta}")
+
+    # query_text = "Mention the details of RYSI Award"
+    # query_results = embed_content([{"type": "text", "data": query_text}])
+    # query_emb = get_embedding_from_item(query_results[0])  # numeric embedding
+    # results = query_index(query_emb, k=5)
+    # query = "yellow flower with petals"
+    # query_emb = _clip_model.encode([query], convert_to_numpy=True)[0].tolist()
+    #
+    # results = collection.query(
+    #     query_embeddings=[query_emb],
+    #     n_results=5,
+    #     include=["documents", "metadatas"]
+    # )
+    #
+    # print(results)
+    #
+    # for r in results:
+    #     print(f"Score: {r['score']}, Type: {r['type']}, Source: {r['meta']['source']}")
+
+
+
