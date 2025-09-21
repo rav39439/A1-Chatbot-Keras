@@ -1,0 +1,479 @@
+#
+#
+# import faiss
+# import numpy as np
+# import json
+# import os
+# import glob
+# import json
+# from dotenv import load_dotenv
+# from fastapi import FastAPI
+# from fastapi.middleware.cors import CORSMiddleware
+#
+# from typing import List
+# import numpy as np
+# from sentence_transformers import SentenceTransformer
+# import google.generativeai as genai
+# from pydantic import BaseModel
+#
+# load_dotenv()
+#
+# # Toggle between OpenAI and SBERT embeddings
+# # USE_OPENAI = bool(os.getenv("USE_OPENAI_EMBEDDINGS", "0") == "1")
+# USE_GEMINI = os.getenv("USE_GEMINI", "False").lower() == "true"
+#
+# if USE_GEMINI:
+#     genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+# else:
+#     _sbert = SentenceTransformer("all-MiniLM-L6-v2")  # small and fast
+#
+#
+# def embed_texts(texts: List[str]) -> List[np.ndarray]:
+#     """Return embeddings for a list of texts"""
+#     if USE_GEMINI:
+#         print("Processing with Gemini Embeddings...")
+#         # The embedding model for Gemini
+#         model = "models/text-embedding-004"  # Or "embedding-001" if 004 is not available or preferred
+#         # Gemini embedding API expects content and a task_type
+#         # For general text embeddings, task_type is usually "retrieval_query" or "retrieval_document"
+#         # If no specific task_type is specified, it defaults to a general purpose embedding.
+#         # However, for best results, it's good practice to specify.
+#         # Let's assume for now a general purpose retrieval document task.
+#         embeddings = []
+#         # The Gemini API handles batches, but there might be practical limits.
+#         # For simplicity, we'll iterate, but you could batch these calls if needed
+#         # based on the API's batching capabilities.
+#         for text in texts:
+#             response = genai.embed_content(
+#                 model=model,
+#                 content=text,
+#                 task_type="retrieval_document"  # Adjust based on your use case
+#             )
+#             embeddings.append(np.array(response["embedding"], dtype=np.float32))
+#         return embeddings
+#     else:
+#         print("Processing with SBERT...")
+#         embs = _sbert.encode(texts, show_progress_bar=False, convert_to_numpy=True)
+#         return [emb.astype("float32") for emb in embs]
+#
+#
+# # --- Text chunking ---
+# CHUNK_SIZE = 500  # characters
+# OVERLAP = 50
+#
+# def chunk_text(text: str, size=1000, overlap=200):
+#     if overlap >= size:
+#         raise ValueError("Overlap must be smaller than chunk size")
+#
+#     chunks = []
+#     start = 0
+#     text_length = len(text)
+#
+#     while start < text_length:
+#         end = min(start + size, text_length)
+#         chunks.append(text[start:end])
+#         start += size - overlap  # move forward safely
+#
+#     return chunks
+#
+#
+# def load_txt_files(folder="data"):
+#     texts, metadata = [], []
+#     for path in glob.glob(os.path.join(folder, "**/*.txt"), recursive=True):
+#         with open(path, "r", encoding="utf-8") as f:
+#             content = f.read()
+#         for idx, chunk in enumerate(chunk_text(content)):
+#             texts.append(chunk)
+#             metadata.append({"source": path, "chunk": idx})
+#     return texts, metadata
+#
+# def build_faiss_index(embeddings, texts, metad, index_path="faiss.index", meta_path="meta.json"):
+#     # embeddings: list of np.array float32
+#     xb = np.stack(embeddings).astype("float32")
+#     d = xb.shape[1]
+#     index = faiss.IndexFlatIP(d)  # use inner product on normalized vectors for cosine
+#     faiss.normalize_L2(xb)
+#     index.add(xb)
+#     faiss.write_index(index, index_path)
+#     # store metadata & texts
+#     meta = [{"text": t, "meta": m} for t, m in zip(texts, metad)]
+#     with open(meta_path, "w", encoding="utf-8") as f:
+#         json.dump(meta, f, ensure_ascii=False)
+#
+# def load_index(index_path="faiss.index", meta_path="meta.json"):
+#     index = faiss.read_index(index_path)
+#     with open(meta_path, "r", encoding="utf-8") as f:
+#         meta = json.load(f)
+#     return index, meta
+#
+# def query_index(query_emb, k=5, index_path="faiss.index", meta_path="meta.json"):
+#     index, meta = load_index(index_path, meta_path)
+#
+#     # Ensure correct shape (1, dim)
+#     q = np.array(query_emb, dtype="float32").reshape(1, -1)
+#
+#     # Normalize
+#     faiss.normalize_L2(q)
+#
+#     # Search
+#     D, I = index.search(q, k)
+#
+#     results = []
+#     for score, idx in zip(D[0], I[0]):
+#         if idx < 0:
+#             continue
+#         results.append({
+#             "score": float(score),
+#             "text": meta[idx]["text"],
+#             "meta": meta[idx]["meta"]
+#         })
+#     return results
+# app = FastAPI()
+# origins = [
+#     "http://localhost:3000",   # your frontend dev server
+#     "http://127.0.0.1:3000",   # optional
+#     "*",                        # allow all origins (not recommended for production)
+# ]
+#
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=origins,      # list of allowed origins
+#     allow_credentials=True,
+#     allow_methods=["*"],        # allow all HTTP methods (GET, POST, etc.)
+#     allow_headers=["*"],        # allow all headers
+# )
+# class ChatRequest(BaseModel):
+#     question: str
+#     history: List[dict] = []  # optional conversation history
+#
+# @app.post("/chat")
+# async def chat(req: ChatRequest):
+#     USE_GEMINI = os.getenv("USE_GEMINI", "False").lower() == "true"
+#     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+#     GEMINI_LLM = os.getenv("GEMINI_LLM", "gemini-1.5-flash")  # Change as you like (e.g., gemini-1.5-pro-latest)
+#
+#     if USE_GEMINI and GEMINI_API_KEY:
+#         genai.configure(api_key=GEMINI_API_KEY)
+#         # Initialize the Gemini model
+#         # For chat-like interactions, we generally use the GenerativeModel class
+#         gemini_model = genai.GenerativeModel(GEMINI_LLM)
+#     else:
+#         print("No model available")
+#
+#     PROMPT_TEMPLATE = """
+#        You are a helpful assistant. Use the following context passages to answer the user question.
+#        If the information is not present in the context, say you don't know.
+#
+#        CONTEXT:
+#        {context}
+#
+#        USER QUESTION:
+#        {question}
+#
+#        Provide a concise, referenced answer. If referencing a source, include the filename from metadata.
+#        """
+#
+#     q_emb = embed_texts(req.question)[0]
+#     # 2) retrieve top k passages
+#     results = query_index(q_emb, k=5)
+#     context = "\n---\n".join([r["text"] + f"\n[source: {r['meta'].get('source', 'unknown')}]"
+#                               for r in results])
+#     print("context is hee")
+#     print(context)
+#     prompt = PROMPT_TEMPLATE.format(context=context, question=req.question)
+#
+#     if USE_GEMINI and GEMINI_API_KEY:  # Assuming these flags/vars are defined
+#         try:
+#             resp = gemini_model.generate_content(
+#                 contents=[{"role": "user", "parts": [prompt]}],
+#                 generation_config=genai.types.GenerationConfig(
+#                     temperature=0.0,
+#                     max_output_tokens=512  # Equivalent to OpenAI's max_tokens
+#                 )
+#             )
+#             # Access the generated text from the response
+#             answer = resp.candidates[0].content.parts[0].text
+#         except Exception as e:
+#             answer = f"Error calling Gemini LLM: {e}"
+#             print(f"Error calling Gemini LLM: {e}")
+#     else:  # Keep the OpenAI part for fallback if needed
+#         # Make sure 'openai' library is imported if this branch is active
+#
+#         print("No LLM configured")
+#
+#     # return with sources
+#     print("result")
+#     return({"answer": answer, "sources": results})
+#
+#
+#
+#
+# # def main():
+# #     # texts, metad = load_txt_files("data")
+# #     # print(f"Found {len(texts)} chunks. Embedding...")
+# #     # embs = embed_texts(texts)
+# #     # build_faiss_index(embs, texts, metad, index_path="faiss.index", meta_path="meta.json")
+# #     # print(embs)
+# #     # print(f"Got {len(embs)} embeddings.")
+# #     # print("Index built.")  # placeholder for FAISS
+# #
+# #
+# #     # return {"answer": answer, "sources": results}
+# #     pass
+# #
+# #
+# #
+# # if __name__ == "__main__":
+# #     main()
+
+
+
+# import os
+# import glob
+# import json
+# import io
+# import base64
+# import faiss
+# import numpy as np
+# from PIL import Image
+# from pdf2image import convert_from_path
+# from pdfminer.high_level import extract_text
+# from sentence_transformers import SentenceTransformer
+# import google.generativeai as genai
+# from dotenv import load_dotenv
+# import fitz  # PyMuPDF for robust PDF processing
+# import os
+# from PIL import Image
+# from pdf2image import convert_from_path
+# import pytesseract
+# from typing import List, Dict, Any
+#
+# load_dotenv()
+#
+# USE_GEMINI = os.getenv("USE_GEMINI", "False").lower() == "true"
+
+# Text model
+# if not USE_GEMINI:
+#     _sbert = SentenceTransformer("all-MiniLM-L6-v2")
+#     _clip = SentenceTransformer("clip-ViT-B-32")  # For images locally
+#
+# if USE_GEMINI:
+#     genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+#
+# # ------------------ Helper functions ------------------
+# _clip = SentenceTransformer('clip-ViT-B-32-multilingual-v1')
+#
+# # def embed_content(inputs):
+# #     """
+# #     inputs: List of dicts like {"type": "text", "data": "..."} or {"type": "image", "data": PIL.Image}
+# #     """
+# #     embeddings = []
+# #     for item in inputs:
+# #         if item["type"] == "text":
+# #             text = item["data"]
+# #             if USE_GEMINI:
+# #                 resp = genai.embed_content(model="models/text-embedding-004",
+# #                                            content=text,
+# #                                            task_type="retrieval_document")
+# #                 embeddings.append(np.array(resp["embedding"], dtype=np.float32))
+# #             else:
+# #                 emb = _sbert.encode([text], convert_to_numpy=True)[0]
+# #                 embeddings.append(emb.astype("float32"))
+# #         elif item["type"] == "image":
+# #             image = item["data"]
+# #             if USE_GEMINI:
+# #                 resp = genai.embed_image(model="models/image-embedding-001", image=image)
+# #                 embeddings.append(np.array(resp["embedding"], dtype=np.float32))
+# #             else:
+# #                 emb = _clip.encode([image], convert_to_numpy=True)[0]
+# #                 embeddings.append(emb.astype("float32"))
+# #         else:
+# #             raise ValueError("Unsupported type")
+# #     return embeddings
+# def embed_content(inputs):
+#     """
+#        Inputs: List of dicts like {"type": "text", "data": "..."} or {"type": "image", "data": PIL.Image}
+#        Uses CLIP to embed both text and images into a single vector space.
+#        """
+#     embeddings = []
+#
+#     # --- Text embeddings ---
+#     texts = [item["data"] for item in inputs if item["type"] == "text"]
+#     if texts:
+#         text_embeddings = _clip.encode(texts, convert_to_numpy=True)
+#         embeddings.append(text_embeddings)
+#
+#     # --- Image embeddings ---
+#     images = [item["data"] for item in inputs if item["type"] == "image"]
+#     if images:
+#         # SentenceTransformer CLIP expects images as PIL.Image objects
+#         # But you must pass them as a list and not accidentally as single items
+#         image_embeddings = _clip.encode(images, convert_to_numpy=True)
+#         embeddings.append(image_embeddings)
+#
+#     if embeddings:
+#         embeddings = np.vstack(embeddings)  # stack text + image embeddings
+#     else:
+#         embeddings = np.array([])
+#
+#     return embeddings
+#
+# def chunk_text(text, size=500, overlap=50):
+#     """Split long text into chunks"""
+#     if overlap >= size:
+#         raise ValueError("Overlap must be smaller than chunk size")
+#     chunks = []
+#     start = 0
+#     while start < len(text):
+#         end = min(start + size, len(text))
+#         chunks.append(text[start:end])
+#         start += size - overlap
+#     return chunks
+#
+# # ------------------ PDF Processing ------------------
+#
+# # def process_pdf(file_path):
+# #     """
+# #     Extract text chunks and images from PDF
+# #     Returns: list of dicts with {"type": "text"/"image", "data": ...}, plus metadata
+# #     """
+# #     content_list = []
+# #     metadata_list = []
+# #
+# #     # Extract text
+# #     text = extract_text(file_path)
+# #     for idx, chunk in enumerate(chunk_text(text)):
+# #         content_list.append({"type": "text", "data": chunk})
+# #         metadata_list.append({"source": file_path, "chunk": idx, "type": "text"})
+# #
+# #     # Extract images
+# #     pages = convert_from_path(file_path, dpi=200)
+# #     img_idx = 0
+# #     for page in pages:
+# #         # page is PIL.Image
+# #         content_list.append({"type": "image", "data": page})
+# #         metadata_list.append({"source": file_path, "chunk": img_idx, "type": "image"})
+# #         img_idx += 1
+# #
+# #     return content_list, metadata_list
+# def process_pdf(file_path: str) -> (List[Dict[str, Any]], List[Dict[str, Any]]):
+#     """
+#     Extracts text chunks and embedded images from a PDF, performing OCR
+#     on scanned pages.
+#
+#     Args:
+#         file_path: The path to the PDF file.
+#
+#     Returns:
+#         A tuple containing a list of content dicts (text/images) and a list of metadata dicts.
+#     """
+#     content_list = []
+#     metadata_list = []
+#
+#     try:
+#         doc = fitz.open(file_path)
+#     except Exception as e:
+#         print(f"Error opening PDF: {e}")
+#         return [], []
+#
+#     for page_num, page in enumerate(doc):
+#         # --- 1. Extract digital text with PyMuPDF ---
+#         text = page.get_text("text")
+#         if text.strip():
+#             for idx, chunk in enumerate(chunk_text(text)):
+#                 content_list.append({"type": "text", "data": chunk})
+#                 metadata_list.append({"source": file_path, "page": page_num + 1, "chunk": idx, "type": "text"})
+#         else:
+#             # --- 2. If no digital text, perform OCR on the page image ---
+#             print(f"No digital text found on page {page_num + 1}. Attempting OCR...")
+#             try:
+#                 # convert_from_path handles the conversion from PDF to a PIL Image
+#                 images = convert_from_path(file_path, first_page=page_num + 1, last_page=page_num + 1, dpi=300)
+#                 if images:
+#                     ocr_text = pytesseract.image_to_string(images[0])
+#                     if ocr_text.strip():
+#                         for idx, chunk in enumerate(chunk_text(ocr_text)):
+#                             content_list.append({"type": "text", "data": chunk})
+#                             metadata_list.append(
+#                                 {"source": file_path, "page": page_num + 1, "chunk": idx, "type": "ocr_text"})
+#             except Exception as e:
+#                 print(f"OCR failed for page {page_num + 1}: {e}")
+#
+#         # --- 3. Extract embedded images with PyMuPDF ---
+#         images = page.get_images(full=True)
+#         for img_idx, img_info in enumerate(images):
+#             try:
+#                 xref = img_info[0]
+#                 base_image = doc.extract_image(xref)
+#                 image_bytes = base_image["image"]
+#
+#                 # Convert bytes to a PIL Image object
+#                 pil_image = Image.open(io.BytesIO(image_bytes))
+#
+#                 content_list.append({"type": "image", "data": pil_image})
+#                 metadata_list.append({"source": file_path, "page": page_num + 1, "image": img_idx, "type": "image"})
+#             except Exception as e:
+#                 print(f"Error extracting image {img_idx} from page {page_num + 1}: {e}")
+#
+#     return content_list, metadata_list
+# # ------------------ FAISS ------------------
+#
+# def build_faiss_index(contents, metad, index_path="faiss.index", meta_path="meta.json"):
+#     embeddings = embed_content(contents)
+#     xb = np.stack(embeddings).astype("float32")
+#     d = xb.shape[1]
+#
+#     # Normalize for cosine similarity
+#     faiss.normalize_L2(xb)
+#     index = faiss.IndexFlatIP(d)
+#     index.add(xb)
+#     faiss.write_index(index, index_path)
+#
+#     # Save metadata
+#     meta = [{"meta": m, "type": c["type"], "text": c.get("data","")} for c, m in zip(contents, metad)]
+#     with open(meta_path, "w", encoding="utf-8") as f:
+#         json.dump(meta, f, ensure_ascii=False)
+#
+# def load_index(index_path="faiss.index", meta_path="meta.json"):
+#     index = faiss.read_index(index_path)
+#     with open(meta_path, "r", encoding="utf-8") as f:
+#         meta = json.load(f)
+#     return index, meta
+#
+# def query_index(query_emb, k=5, index_path="faiss.index", meta_path="meta.json"):
+#     index, meta = load_index(index_path, meta_path)
+#     q = np.array(query_emb, dtype="float32").reshape(1, -1)
+#     faiss.normalize_L2(q)
+#     D, I = index.search(q, k)
+#     results = []
+#     for score, idx in zip(D[0], I[0]):
+#         if idx < 0:
+#             continue
+#         results.append({
+#             "score": float(score),
+#             "text": meta[idx].get("text", ""),
+#             "meta": meta[idx]["meta"],
+#             "type": meta[idx]["type"]
+#         })
+#     return results
+#
+# # ------------------ Example Usage ------------------
+#
+# if __name__ == "__main__":
+#     pdf_files = glob.glob("data/*.pdf")
+#     all_contents = []
+#     all_metadata = []
+#     for pdf in pdf_files:
+#         contents, metad = process_pdf(pdf)
+#         all_contents.extend(contents)
+#         all_metadata.extend(metad)
+#
+#     build_faiss_index(all_contents, all_metadata)
+#     print("FAISS index built with text + image embeddings!")
+#
+#     # Example query: text
+#     text_query = "Explain the main topic of the PDF"
+#     q_emb = embed_content([{"type": "text", "data": text_query}])[0]
+#     results = query_index(q_emb, k=3)
+#     for r in results:
+#         print(r["score"], r["type"], r["meta"]["source"])
