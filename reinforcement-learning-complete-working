@@ -1,0 +1,421 @@
+# import os
+# import shutil
+# import copy
+# from peft import get_peft_model, LoraConfig, TaskType
+# src = "/kaggle/input/summerization-model6"        # your uploaded dataset folder
+# dst = "/kaggle/working/summerization-model6"      # writable output folder
+
+# # Copy entire folder
+# shutil.copytree(src, dst, dirs_exist_ok=True)
+
+# import torch
+# from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+# from peft import PeftModel
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# # Path to your copied folder
+# model_dir = "/kaggle/working/summerization-model6"
+
+# #------------------------------
+
+# base_model_name = "facebook/bart-base"
+# base_model = AutoModelForSeq2SeqLM.from_pretrained(base_model_name)
+# tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+
+# # 2️⃣ Load your existing LoRA adapter (frozen by default)
+# model = PeftModel.from_pretrained(base_model, model_dir)
+
+
+# for name, param in model.named_parameters():
+#     if "lora_" in name:          # LoRA injected layers
+#         param.requires_grad = True
+#     else:                        # Base model
+#         param.requires_grad = False
+
+
+# ref_model = AutoModelForSeq2SeqLM.from_pretrained(base_model_name)
+# ref_model.eval()
+# for param in ref_model.parameters():
+#     param.requires_grad = False
+# ref_model.to(device)
+
+# from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+# import torch.nn.functional as F
+
+# beta = 0.1  # weight of KL penalty
+# def compute_reward(pred_text, ref_text):
+#     smoothie = SmoothingFunction().method4
+#     reference = [ref_text.split()]
+#     candidate = pred_text.split()
+#     bleu_score = sentence_bleu(reference, candidate, smoothing_function=smoothie)
+#     return bleu_score
+
+# import torch.nn.functional as F
+# from torch.optim import AdamW
+
+# optimizer = AdamW(model.parameters(), lr=1e-6)  # small LR for RL fine-tuning
+
+# def rl_update(model, ref_model, tokenizer, user_input, reference_output, optimizer, device, beta=0.1):
+#     """
+#     RL update for LoRA fine-tuned BART with reference KL penalty.
+#     """
+#     model.train()
+
+#     # -----------------------
+#     # Encode input & reference
+#     # -----------------------
+#     inputs = tokenizer(user_input, return_tensors="pt", padding=True, truncation=True, max_length=512).to(device)
+#     labels = tokenizer(reference_output, return_tensors="pt", padding=True, truncation=True, max_length=512).input_ids.to(device)
+
+#     # -----------------------
+#     # Sample from model
+#     # -----------------------
+#     outputs = model.generate(
+#         **inputs,
+#         max_length=100,
+#         do_sample=True,
+#         top_k=50,
+#         top_p=0.95
+#     )
+#     pred_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+#     # -----------------------
+#     # Compute reward (BLEU)
+#     # -----------------------
+#     smoothie = SmoothingFunction().method4
+#     reference_tokens = [reference_output.split()]
+#     candidate_tokens = pred_text.split()
+#     reward = sentence_bleu(reference_tokens, candidate_tokens, smoothing_function=smoothie)
+
+#     # -----------------------
+#     # Forward pass with labels
+#     # -----------------------
+#     output_logits = model(**inputs, labels=labels)
+
+#     # Log probabilities (for REINFORCE)
+#     log_probs = -F.cross_entropy(
+#         output_logits.logits.view(-1, output_logits.logits.size(-1)),
+#         labels.view(-1),
+#         reduction="mean"
+#     )
+
+#     # -----------------------
+#     # KL penalty vs frozen reference model
+#     # -----------------------
+#     with torch.no_grad():
+#         ref_logits = ref_model(**inputs, labels=labels).logits
+
+#     reward_tensor = torch.tensor(reward, dtype=torch.float32, device=device)
+
+#     kl_loss = F.kl_div(
+#         F.log_softmax(output_logits.logits, dim=-1),
+#         F.softmax(ref_logits, dim=-1),
+#         reduction="batchmean"
+#     )
+
+#     # -----------------------
+#     # Total loss = policy gradient + KL
+    
+#     # -----------------------
+#     total_loss = -(reward * log_probs) + beta * kl_loss
+#     print("rl_loss:", total_loss)
+#     print("rl_loss.requires_grad:", total_loss.requires_grad)
+
+#     # -----------------------
+#     # Backprop only LoRA parameters
+#     # -----------------------
+#     optimizer.zero_grad()
+#     total_loss.backward()
+#     optimizer.step()
+
+#     return pred_text, reward, total_loss.item()
+
+# user_input = "The UN General Assembly approved its first global resolution urging a coal phase-out within 20 years.It gained support from 170 countries, aiming to align with the Paris Agreement’s 1.5°C target.Environmental groups praised it, while critics noted the absence of financial support for developing nations.India called for investment and technology transfer, and China pledged gradual cuts without a fixed timeline.Despite being non-binding, the resolution boosted renewable stocks and may shape future binding climate pacts."
+# reference_output = "The UN General Assembly passed its first global resolution to phase out coal within 20 years, pressuring major coal users like India and China to accelerate renewable adoption"
+
+# pred, reward, rl_loss = rl_update(
+#     model,       # trainable LoRA model
+#     ref_model,   # frozen reference model
+#     tokenizer,
+#     user_input,
+#     reference_output,
+#     optimizer,
+#     device
+# )
+
+# print(f"Predicted: {pred}")
+# print(f"Reference: {reference_output}")
+# print(f"Reward: {reward:.4f}, RL Loss: {rl_loss:.4f}")
+
+
+#-----------------------------------------------------------------------------------
+# import os
+# import shutil
+
+# src = "/kaggle/input/summerization-model6"        # your uploaded dataset folder
+# dst = "/kaggle/working/summerization-model6"      # writable output folder
+
+# # Copy entire folder
+# shutil.copytree(src, dst, dirs_exist_ok=True)
+
+# import torch
+# from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+# from peft import PeftModel
+
+# # Path to your copied folder
+# model_dir = "/kaggle/working/summerization-model6"
+
+# # Load base model (must be same one you trained with)
+# base_model = "facebook/bart-base"  # or "facebook/bart-large"
+# print("Base model:", base_model)
+
+# # Load tokenizer + base model
+# tokenizer = AutoTokenizer.from_pretrained(base_model)
+# model = AutoModelForSeq2SeqLM.from_pretrained(base_model)
+
+# # Load LoRA/adapter weights
+# model = PeftModel.from_pretrained(model, model_dir)
+# # lora_config = LoraConfig(
+# #     r=8,
+# #     lora_alpha=16,
+# #     target_modules=["q_proj","v_proj","k_proj","out_proj"],
+# #     lora_dropout=0.1,
+# #     bias="none",
+# #     task_type="SEQ_2_SEQ_LM"
+# # )
+
+# # # 4️⃣ Re-wrap model to make LoRA trainable
+# # model = get_peft_model(model, lora_config)
+
+# # # 5️⃣ Freeze base weights, make LoRA weights trainable
+# # for name, param in model.named_parameters():
+# #     if "lora_" not in name:
+# #         param.requires_grad = False
+# #     else:
+# #         param.requires_grad = True
+
+# for name, param in model.named_parameters():
+#     if "lora_" in name:          # LoRA injected layers
+#         param.requires_grad = True
+#     else:                        # Base model
+#         param.requires_grad = False
+
+# # 2️⃣ Verify
+# trainable, frozen = 0, 0
+# for _, p in model.named_parameters():
+#     # if p.requires_grad:
+#     #     trainable += p.numel()
+#     # else:
+#     #     frozen += p.numel()
+#     print(p.requires_grad)
+# print(f"Trainable params: {trainable:,}, Frozen params: {frozen:,}")
+# model.eval()
+
+# # # Define constants
+# MAX_LENGTH = 512
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# model.to(device)
+
+# # Run inference
+# test_question = "In a historic move, the United Nations General Assembly passed a resolution yesterday urging member states to phase out the use of coal within the next two decades, marking the first global agreement of its kind. The resolution, which received overwhelming support from 170 out of 193 countries, highlights the urgent need to reduce carbon emissions in order to meet the 1.5°C target set by the Paris Climate Agreement. While the resolution is not legally binding, it puts significant pressure on major coal-dependent economies, such as India and China, to accelerate their transition toward renewable energy sources.Environmental groups have hailed the decision as a major victory, pointing out that coal accounts for nearly 40% of global CO2 emissions. However, critics argue that the resolution fails to provide concrete financial mechanisms to support developing nations in making the transition. India’s ambassador to the UN emphasized that while India remains committed to clean energy, it requires substantial investment and technology transfer from developed countries to ensure a just transition. Meanwhile, China, the world’s largest coal consumer, stated it will gradually reduce coal usage but stopped short of committing to a fixed timeline.The resolution also calls for international cooperation in scaling up wind, solar, and nuclear energy, along with increased funding for research into energy storage solutions. Experts note that while the resolution sets an ambitious tone, the lack of enforcement mechanisms may limit its effectiveness. Still, the announcement has already influenced global markets, with renewable energy stocks surging by over 5% following the vote. Analysts predict that the resolution could become a blueprint for future binding agreements on fossil fuel reduction."
+# inputs = tokenizer(test_question, return_tensors="pt", max_length=MAX_LENGTH, truncation=True).to(device)
+
+# generated_ids = model.generate(**inputs, max_new_tokens=100)
+# print("Generated answer:", tokenizer.decode(generated_ids[0], skip_special_tokens=True))
+
+
+#-----------------------------------------------------------------------------------
+
+
+#----------------------------------list of inputs handling----------------------------
+
+
+import os
+import shutil
+from peft import PeftModel
+import torch
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+import torch.nn.functional as F
+from torch.optim import AdamW
+
+# -----------------------------
+# Paths
+# -----------------------------
+src = "/kaggle/input/summerization-model6"
+dst = "/kaggle/working/summerization-model6"
+shutil.copytree(src, dst, dirs_exist_ok=True)
+model_dir = dst
+
+# -----------------------------
+# Device
+# -----------------------------
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# -----------------------------
+# Load base + LoRA model
+# -----------------------------
+base_model_name = "facebook/bart-base"
+tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+base_model = AutoModelForSeq2SeqLM.from_pretrained(base_model_name)
+model = PeftModel.from_pretrained(base_model, model_dir)
+
+# Make LoRA trainable, freeze base
+for name, param in model.named_parameters():
+    if "lora_" in name:
+        param.requires_grad = True
+    else:
+        param.requires_grad = False
+
+# -----------------------------
+# Frozen reference model (for KL penalty)
+# -----------------------------
+ref_model = AutoModelForSeq2SeqLM.from_pretrained(base_model_name)
+ref_model.eval()
+for param in ref_model.parameters():
+    param.requires_grad = False
+ref_model.to(device)
+
+# -----------------------------
+# Optimizer
+# -----------------------------
+optimizer = AdamW(model.parameters(), lr=1e-6)
+
+# -----------------------------
+# RL update function
+# -----------------------------
+beta = 0.1  # KL penalty weight
+
+def rl_update(model, ref_model, tokenizer, user_input, reference_output, optimizer, device, beta=0.1):
+    model.train()
+    
+    # Encode input & reference
+    inputs = tokenizer(user_input, return_tensors="pt", padding=True, truncation=True, max_length=512).to(device)
+    labels = tokenizer(reference_output, return_tensors="pt", padding=True, truncation=True, max_length=512).input_ids.to(device)
+    
+    # Sample from model
+    outputs = model.generate(
+        **inputs,
+        max_length=100,
+        do_sample=True,
+        top_k=50,
+        top_p=0.95
+    )
+    pred_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    
+    # BLEU reward
+    smoothie = SmoothingFunction().method4
+    reference_tokens = [reference_output.split()]
+    candidate_tokens = pred_text.split()
+    reward = sentence_bleu(reference_tokens, candidate_tokens, smoothing_function=smoothie)
+    
+    # Forward pass with labels
+    output_logits = model(**inputs, labels=labels)
+    
+    # Log-probabilities for REINFORCE
+    log_probs = -F.cross_entropy(
+        output_logits.logits.view(-1, output_logits.logits.size(-1)),
+        labels.view(-1),
+        reduction="mean"
+    )
+    
+    # KL penalty vs reference
+    with torch.no_grad():
+        ref_logits = ref_model(**inputs, labels=labels).logits
+    
+    kl_loss = F.kl_div(
+        F.log_softmax(output_logits.logits, dim=-1),
+        F.softmax(ref_logits, dim=-1),
+        reduction="batchmean"
+    )
+    
+    total_loss = -(reward * log_probs) + beta * kl_loss
+    
+    optimizer.zero_grad()
+    total_loss.backward()
+    optimizer.step()
+    
+    return pred_text, reward, total_loss.item()
+
+# -----------------------------
+# Multiple user inputs
+# -----------------------------
+# user_inputs = [
+#     "The UN General Assembly approved its first global resolution urging a coal phase-out within 20 years...",
+#     "India emphasized investment and technology transfer for a clean energy transition.",
+#     "Renewable energy stocks surged after the UN climate resolution."
+# ]
+
+# reference_outputs = [
+#     "The UN General Assembly passed its first global resolution to phase out coal within 20 years, pressuring major coal users like India and China.",
+#     "India called for investment and technology transfer to ensure a just clean energy transition.",
+#     "Renewable stocks rose after the UN climate resolution vote."
+# ]
+
+user_inputs = [
+    "The UN General Assembly approved its first global resolution urging a coal phase-out within 20 years, highlighting the urgent need for climate action.",
+    "India emphasized investment and technology transfer for a clean energy transition, seeking support from developed countries.",
+    "Renewable energy stocks surged after the UN climate resolution, reflecting investor optimism about global green policies.",
+    "The European Union announced stricter emissions targets for 2030, aiming to reduce carbon output by 55% compared to 1990 levels.",
+    "A major heatwave in Europe led to unprecedented wildfires, forcing thousands to evacuate affected areas.",
+    "The World Bank pledged $20 billion to support sustainable infrastructure projects in developing countries.",
+    "Tesla unveiled its latest electric vehicle model with extended battery life and autonomous driving features.",
+    "Scientists discovered a new coral species in the Great Barrier Reef, raising hopes for marine biodiversity preservation."
+]
+
+reference_outputs = [
+    "The UN General Assembly passed its first global resolution to phase out coal within 20 years, pressuring major coal users like India and China.",
+    "India called for investment and technology transfer to ensure a just clean energy transition.",
+    "Renewable stocks rose after the UN climate resolution vote.",
+    "EU sets ambitious 2030 emissions reduction target of 55% from 1990 levels.",
+    "Severe European heatwave triggers wildfires and mass evacuations.",
+    "World Bank commits $20B for sustainable infrastructure in developing nations.",
+    "Tesla launches new EV model with longer battery life and autonomous driving.",
+    "New coral species discovered in Great Barrier Reef, offering hope for marine biodiversity."
+]
+
+# -----------------------------
+# Iterative improvement
+# -----------------------------
+for inp, ref in zip(user_inputs, reference_outputs):
+    pred, reward, loss = rl_update(model, ref_model, tokenizer, inp, ref, optimizer, device, beta=beta)
+    print(f"Input: {inp[:80]}...")
+    print(f"Predicted: {pred}")
+    print(f"Reference: {ref}")
+    print(f"Reward: {reward:.4f}, RL Loss: {loss:.4f}\n")
+
+# -----------------------------
+# Save improved LoRA model
+# -----------------------------
+save_path = "/kaggle/working/improved_summerization_model"
+model.save_pretrained(save_path)
+
+print("corrected predictions")
+pred_model = PeftModel.from_pretrained(base_model, save_path)
+pred_model.eval()
+
+# # Define constants
+MAX_LENGTH = 512
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+pred_model.to(device)
+
+# Run inference
+# test_question = "Always remember how to solve tough problems. This will help you to get jobs"
+# inputs = tokenizer(test_question, return_tensors="pt", max_length=MAX_LENGTH, truncation=True).to(device)
+
+# generated_ids = model.generate(**inputs, max_new_tokens=100)
+# print("Generated answer:", tokenizer.decode(generated_ids[0], skip_special_tokens=True))
+
+
+
+for inp, ref in zip(user_inputs, reference_outputs):
+    inputs = tokenizer(inp, return_tensors="pt", max_length=MAX_LENGTH, truncation=True).to(device)
+    generated_ids = model.generate(**inputs, max_new_tokens=100)
+    print("Generated answer:", tokenizer.decode(generated_ids[0], skip_special_tokens=True))
+
+    # pred, reward, loss = rl_update(model, ref_model, tokenizer, inp, ref, optimizer, device, beta=beta)
+    # print(f"Input: {inp[:80]}...")
+    # print(f"Predicted: {pred}")
+    print(f"Reference: {ref}")
+    # print(f"Reward: {reward:.4f}, RL Loss: {loss:.4f}\n")
+print(f"Improved LoRA model saved at: {save_path}")
