@@ -1,0 +1,364 @@
+# import os
+# import json
+# import shutil
+# import torch
+import pandas as pd
+# from torch.utils.data import Dataset, DataLoader
+# from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+# from torch.optim import AdamW
+# from peft import get_peft_model, LoraConfig, TaskType
+
+# # ================================
+# # STEP 1: Load CSV and convert to dict
+# # ================================
+# csv_path = "/kaggle/input/dataset-sample/email_dataset_10000.csv"  # <-- your CSV file
+# df = pd.read_csv(csv_path)
+
+# # Ensure CSV has 'input' and 'output' columns
+# raw_data = df.to_dict(orient="records")
+
+# # ================================
+# # STEP 2: Tokenization
+# # ================================
+# tokenizer = AutoTokenizer.from_pretrained("huawei-noah/TinyBERT_General_4L_312D")
+# MAX_LENGTH = 512
+
+from sklearn.preprocessing import LabelEncoder
+
+# # Encode labels
+# le = LabelEncoder()
+# categories = [example["category"] for example in raw_data]
+# labels = le.fit_transform(categories)
+
+# def tokenize_example(example, label):
+#     inputs = tokenizer(
+#         example["email_text"],
+#         max_length=MAX_LENGTH,
+#         truncation=True,
+#         padding="max_length",
+#         return_tensors="pt"
+#     )
+#     inputs["labels"] = torch.tensor(label, dtype=torch.long)
+#     return {k: v.squeeze() if v.dim() > 1 else v for k, v in inputs.items()}
+
+# tokenized_data = [tokenize_example(raw_data[i], labels[i]) for i in range(len(raw_data))]
+
+# # ================================
+# # STEP 3: Dataset + DataLoader
+# # ================================
+
+# class ProfitLossDataset(Dataset):
+#     def __init__(self, tokenized_data):
+#         self.data = tokenized_data
+
+#     def __len__(self):
+#         return len(self.data)
+
+#     def __getitem__(self, idx):
+#         item = {key: val if isinstance(val, torch.Tensor) else torch.tensor(val) for key, val in self.data[idx].items()}
+#         return item
+
+
+# train_dataset = ProfitLossDataset(tokenized_data)
+# train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+
+# # ================================
+# # STEP 4: Load Model + LoRA
+# # ================================
+# from transformers import AutoModelForSequenceClassification
+
+# model = AutoModelForSequenceClassification.from_pretrained(
+#     "huawei-noah/TinyBERT_General_4L_312D",
+#     num_labels=3  # spam / legit / advertisement
+# )
+# print("TinyBERT model loaded")
+# peft_config = LoraConfig(
+#     r=8,
+#     lora_alpha=32,
+#     target_modules=["attention.self.query", "attention.self.key", "attention.self.value", "attention.output.dense"],
+#     lora_dropout=0.05,
+#     task_type=TaskType.SEQ_CLS  # classification task
+# )
+# print("LoRA config ready")
+# model = get_peft_model(model, peft_config)
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# model.to(device)
+
+
+# optimizer = AdamW(model.parameters(), lr=3e-4)
+
+
+# # ================================
+# # STEP 5: Training Loop
+# # ================================
+# model.train()
+# for epoch in range(1):  # change epochs if needed
+#     total_batches = len(train_loader)
+#     print(f"\nEpoch {epoch+1} started... (Total Batches: {total_batches})")
+
+#     for batch_idx, batch in enumerate(train_loader, start=1):
+#         batch = {k: v.to(device) for k, v in batch.items()}
+#         outputs = model(**batch)
+#         loss = outputs.loss
+#         loss.backward()
+#         optimizer.step()
+#         optimizer.zero_grad()
+
+#         # Print current batch and total batches
+#         print(f"Epoch [{epoch+1}] | Batch [{batch_idx}/{total_batches}] | Loss: {loss.item():.4f}")
+
+# # ================================
+# # STEP 6: Save Model
+# # ================================
+# output_dir = "./lora_finetuned_bart"
+# os.makedirs(output_dir, exist_ok=True)
+
+# model.print_trainable_parameters()
+# model.save_pretrained(output_dir)
+# tokenizer.save_pretrained(output_dir)
+
+# # ================================
+# # STEP 7: Inference Test
+# # ================================
+# model.eval()
+# test_input = "Exclusive offer on watches. Please call us at 7463784738"
+
+# # Tokenize input
+# inputs = tokenizer(
+#     test_input,
+#     return_tensors="pt",
+#     max_length=MAX_LENGTH,
+#     truncation=True,
+#     padding="max_length"
+# ).to(device)
+
+# # Forward pass
+# with torch.no_grad():
+#     outputs = model(**inputs)
+#     logits = outputs.logits
+#     predicted_class_idx = torch.argmax(logits, dim=-1).item()
+
+# # Map index back to category
+# predicted_category = le.inverse_transform([predicted_class_idx])[0]
+
+# print("Predicted Category:", predicted_category)
+
+# # Save as zip for Kaggle output
+# shutil.make_archive("/kaggle/working/lora_finetuned_bart", 'zip', output_dir)
+
+
+
+
+#-------------------------------------------------------------------
+
+
+
+#-----------------------------------------
+
+
+import os
+import shutil
+import torch
+import torch.nn.functional as F
+from torch.optim import AdamW
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from peft import PeftModel
+from sklearn.preprocessing import LabelEncoder
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# -----------------------------
+
+# -----------------------------
+src = "/kaggle/input/latest-improved-model"
+dst = "/kaggle/working/latest-improved-model"
+shutil.copytree(src, dst, dirs_exist_ok=True)
+model_dir = dst
+
+# -----------------------------
+# Device
+# -----------------------------
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# -----------------------------
+# Load base + LoRA model
+# -----------------------------
+base_model_name = "huawei-noah/TinyBERT_General_4L_312D"
+num_labels = 3  # Must match original LoRA checkpoint
+
+tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+base_model = AutoModelForSequenceClassification.from_pretrained(
+    base_model_name,
+    num_labels=num_labels
+)
+model = PeftModel.from_pretrained(base_model, model_dir).to(device)
+
+# Freeze base model, train only LoRA layers
+for name, param in model.named_parameters():
+    param.requires_grad = "lora_" in name
+
+# -----------------------------
+# Frozen reference model (KL penalty)
+# -----------------------------
+ref_model = AutoModelForSequenceClassification.from_pretrained(
+    base_model_name,
+    num_labels=num_labels
+).to(device)
+ref_model.eval()
+for param in ref_model.parameters():
+    param.requires_grad = False
+
+# -----------------------------
+# Optimizer
+# -----------------------------
+optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-6)
+
+# -----------------------------
+# Reward function
+# -----------------------------
+def compute_reward(pred_label, ref_label):
+    return 1.0 if pred_label == ref_label else 0.0
+
+# -----------------------------
+# RL update function
+# -----------------------------
+
+
+def rl_update(model, ref_model, tokenizer, user_input, reference_output, optimizer, device, le, beta=0.01):
+    model.train()
+    
+    # Tokenize input
+    inputs = tokenizer(user_input, return_tensors="pt", padding=True, truncation=True, max_length=512).to(device)
+    
+    # Encode label
+    label_idx = le.transform([reference_output])[0]
+    labels = torch.tensor([label_idx], dtype=torch.long).to(device)
+    
+    # Sample from model
+    with torch.no_grad():
+        logits = model(**inputs).logits
+    pred_idx = torch.argmax(logits, dim=-1).item()
+    pred_label = le.inverse_transform([pred_idx])[0]
+    
+    # Compute reward
+    reward = compute_reward(pred_label, reference_output)
+    reward_tensor = torch.tensor([reward], dtype=torch.float32, device=device)
+    
+    # Forward pass for RL update
+    output_logits = model(**inputs).logits
+    # log_prob = F.log_softmax(output_logits, dim=-1)[0, labels[0]]
+    # loss_pg = -reward_tensor * log_prob
+    
+    # # KL divergence vs frozen reference model
+    # with torch.no_grad():
+    #     ref_logits = ref_model(**inputs).logits
+    # kl_loss = F.kl_div(
+    #     F.log_softmax(output_logits, dim=-1),
+    #     F.softmax(ref_logits, dim=-1),
+    #     reduction="batchmean"
+    # )
+    # # Total loss
+    # total_loss = loss_pg + beta * kl_loss
+    log_probs = F.log_softmax(output_logits, dim=-1)
+
+
+    log_prob = log_probs[0, labels[0]]
+    loss_pg = -reward_tensor * log_prob
+    
+    # 6️⃣ KL penalty vs frozen reference model
+    with torch.no_grad():
+        ref_logits = ref_model(**inputs).logits
+    kl_loss = F.kl_div(
+        F.log_softmax(output_logits, dim=-1),
+        F.softmax(ref_logits, dim=-1),
+        reduction="batchmean"
+    )
+
+    # print(output_logits)
+
+    # 7️⃣ Total loss
+    total_loss = loss_pg + beta * kl_loss
+    # print(f"totalloss  {total_loss}")
+    # print (f"klloss   {kl_loss }")
+    # print (f"logprobsoft   { log_probs}")
+
+    # print (f"logprob   { log_prob}")
+
+    # print(f"loss_pg  {loss_pg}")
+    # print(output_logits)
+    # print(f"Input: {user_input[:80]}...")
+    # print(f"Predicted: {pred_label}")
+    # print(f"Reference: {reference_output}")
+
+    
+    optimizer.zero_grad()
+    total_loss.backward()
+    optimizer.step()
+    
+    return pred_label, reward, total_loss.item()
+
+# -----------------------------
+# Load dataset
+# -----------------------------
+csv_path = "/kaggle/input/message-set/message_classification_5000.csv"
+df = pd.read_csv(csv_path)
+user_inputs = df['message'].tolist()
+reference_outputs = df['label'].tolist()
+
+# user_inputs = [
+#    "Hurry! Buy one get one free on all fitness supplements. Offer valid only for today!",
+#     "Special offer on annual gym membership. Get 3 months free with your yearly plan!",
+#     "Hurry! Buy one get one free on all fitness supplements. Offer valid only for today!",
+#     "Check out our exclusive range of smart watches with 40% discount. Visit our store today and grab the deal.",
+#     "Upgrade your wardrobe with our new winter collection. Avail extra 10% off on first purchase.",
+#     "Introducing the new iPhone series with advanced camera and battery. Pre-book now for exciting offers.",
+#     "Dear user, your bank account will be frozen soon. Please verify your identity using this link to avoid suspension."
+# ]
+
+# reference_outputs = [
+#     "spam",
+#     "advertisement",
+#     "spam",
+#     "advertisement",
+#     "advertisement",
+#     "advertisement",
+#     "spam"
+# ]
+
+le = LabelEncoder()
+# le.fit(reference_outputs)
+label_mapping = ["spam", "legit", "advertisement"]
+le.fit(label_mapping)
+#----------------------------
+# Training loop
+# -----------------------------
+losses=[]
+rewards=[]
+
+num_epochs = 6
+for epoch in range(1):
+    epoch_losses = []
+    epoch_rewards = []
+
+    print(f"Epoch {epoch+1}/{num_epochs}")
+    for inp, ref in zip(user_inputs, reference_outputs):
+        pred, reward, loss = rl_update(model, ref_model, tokenizer, inp, ref, optimizer, device, le, beta=0.001)
+        losses.append(loss)
+        rewards.append(reward)
+
+        epoch_losses.append(loss)
+        epoch_rewards.append(reward)
+       
+        print(f"Reward: {reward:.4f}, RL Loss: {loss:.4f}")
+    print("epoch completed")
+    avg_loss = sum(epoch_losses) / len(epoch_losses)
+    avg_reward = sum(epoch_rewards) / len(epoch_rewards)
+    print(f"→ Avg Loss: {avg_loss:.4f}, Avg Reward: {avg_reward:.4f}")
+
+# -----------------------------
+# Save improved LoRA model
+
+save_path = "/kaggle/working/improved_model"
+model.save_pretrained(save_path)
+shutil.make_archive(base_name=save_path, format='zip', root_dir=save_path)
+print(f"Model saved and zipped at {save_path}.zip")
