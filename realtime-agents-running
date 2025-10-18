@@ -1,0 +1,276 @@
+# import numpy as np
+# import pandas as pd
+# import random
+# import torch
+# import torch.nn as nn
+# import torch.optim as optim
+
+# # Load data
+# data = pd.read_csv("/kaggle/input/userdata-agent/user_data.csv")
+
+# states = data['state'].unique().tolist()
+# actions = data['action'].unique().tolist()
+# num_states = len(states)
+# num_actions = len(actions)
+
+# # One-hot encode states
+# def state_to_tensor(state_name):
+#     vec = torch.zeros(num_states)
+#     vec[states.index(state_name)] = 1.0
+#     return vec
+
+# # Compute reward probabilities
+# reward_probs = {}
+# for state in states:
+#     reward_probs[state] = {}
+#     for action in actions:
+#         row = data[(data['state'] == state) & (data['action'] == action)]
+#         if not row.empty:
+#             prob = (row['clicks'].values[0] + row['purchases'].values[0]) / row['views'].values[0]
+#             reward_probs[state][action] = prob
+#         else:
+#             reward_probs[state][action] = 0.1
+
+# # Reward function
+# def get_reward(state, action):
+#     prob = reward_probs[state][action]
+#     r = random.random()
+#     if r < prob * 0.3:
+#         return -5
+#     elif r < prob * 0.6:
+#         return 0
+#     elif r < prob * 0.9:
+#         return 5
+#     else:
+#         return 10
+
+# # Define PyTorch Q-network
+# class QNetwork(nn.Module):
+#     def __init__(self, input_size, output_size):
+#         super(QNetwork, self).__init__()
+#         self.fc = nn.Linear(input_size, output_size)
+        
+#     def forward(self, x):
+#         return self.fc(x)
+
+# model = QNetwork(num_states, num_actions)
+# optimizer = optim.SGD(model.parameters(), lr=0.1)
+# loss_fn = nn.MSELoss()
+
+# # Hyperparameters
+# gamma = 0.9
+# epsilon = 0.2
+# episodes = 2000
+
+# # Training loop
+# for episode in range(episodes):
+#     state_name = random.choice(states)
+#     state_tensor = state_to_tensor(state_name)
+    
+#     if random.random() < epsilon:
+#         action_idx = random.choice(range(num_actions))  # explore
+#     else:
+#         with torch.no_grad():
+#             q_values = model(state_tensor)
+#             action_idx = torch.argmax(q_values).item()    # exploit
+
+#     action_name = actions[action_idx]
+#     reward = get_reward(state_name, action_name)
+    
+#     # Next state
+#     next_state_name = random.choice(states)
+#     next_state_tensor = state_to_tensor(next_state_name)
+    
+#     # Compute target Q-value
+#     with torch.no_grad():
+#         next_q_values = model(next_state_tensor)
+#         target_q = reward + gamma * torch.max(next_q_values).item()
+    
+#     # Current Q-value
+#     q_values = model(state_tensor)
+#     current_q = q_values[action_idx]
+    
+#     # Compute loss and update
+#     loss = loss_fn(current_q, torch.tensor(target_q))
+#     optimizer.zero_grad()
+#     loss.backward()
+#     optimizer.step()
+
+# # Save the model
+# torch.save(model.state_dict(), "q_network_model.pth")
+
+# # Load model for prediction
+# loaded_model = QNetwork(num_states, num_actions)
+# loaded_model.load_state_dict(torch.load("q_network_model.pth"))
+# loaded_model.eval()
+
+# # Function to predict best action
+# def predict_best_action(state_name):
+#     state_tensor = state_to_tensor(state_name)
+#     with torch.no_grad():
+#         q_values = loaded_model(state_tensor)
+#     best_action_idx = torch.argmax(q_values).item()
+#     return actions[best_action_idx]
+
+# # Example
+# # for state in states:
+# print(f"Best action for home_page: {predict_best_action('home_page')}")
+
+
+# print("Weights (Q-values) for each action per state:")
+# print(model.fc.weight)   # shape: [num_actions, num_states]
+
+# print("\nBiases for each action:")
+# print(model.fc.bias)     # shape: [num_actions]
+
+# # If you want a more readable format: state vs action
+# for i, state in enumerate(states):
+#     print(f"\nState: {state}")
+#     for j, action in enumerate(actions):
+#         # Weight from input neuron i (state) to output neuron j (action)
+#         q_value = model.fc.weight[j, i].item() + model.fc.bias[j].item()
+#         print(f"  Action: {action:25s} → Q-value: {q_value:.2f}")
+
+
+
+#--------------------------------------------------------------------------
+
+
+import pandas as pd
+import random
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+# Define nested states
+pages = ['home_page', 'search_page', 'product_page', 'cart_page', 'checkout_page']
+user_types = ['new_user', 'returning_user']
+time_of_day = ['morning', 'afternoon', 'evening']
+
+# Generate all possible nested states
+nested_states = [(p, u, t) for p in pages for u in user_types for t in time_of_day]
+actions = ['show_ad', 'recommend_product', 'offer_discount', 'send_email', 'push_notification']
+
+num_states = len(nested_states)
+num_actions = len(actions)
+
+# One-hot encode nested state
+def state_to_tensor(state_tuple):
+    vec = torch.zeros(num_states)
+    idx = nested_states.index(state_tuple)
+    vec[idx] = 1.0
+    return vec
+
+# Generate a sample CSV dataset for nested states
+data_rows = []
+for state in nested_states:
+    for action in actions:
+        views = random.randint(50, 500)
+        clicks = random.randint(0, views)
+        purchases = random.randint(0, clicks)
+        data_rows.append({
+            'page': state[0],
+            'user_type': state[1],
+            'time_of_day': state[2],
+            'action': action,
+            'views': views,
+            'clicks': clicks,
+            'purchases': purchases
+        })
+
+df = pd.DataFrame(data_rows)
+df.to_csv('nested_user_data.csv', index=False)
+
+# Compute reward probabilities
+reward_probs = {}
+for state in nested_states:
+    reward_probs[state] = {}
+    for action in actions:
+        row = df[
+            (df['page'] == state[0]) &
+            (df['user_type'] == state[1]) &
+            (df['time_of_day'] == state[2]) &
+            (df['action'] == action)
+        ]
+        if not row.empty:
+            prob = (row['clicks'].values[0] + row['purchases'].values[0]) / row['views'].values[0]
+            reward_probs[state][action] = prob
+        else:
+            reward_probs[state][action] = 0.1
+
+# Reward function
+def get_reward(state, action):
+    prob = reward_probs[state][action]
+    r = random.random()
+    if r < prob * 0.3:
+        return -5
+    elif r < prob * 0.6:
+        return 0
+    elif r < prob * 0.9:
+        return 5
+    else:
+        return 10
+
+# PyTorch Q-network
+class QNetwork(nn.Module):
+    def __init__(self, input_size, output_size):
+        super(QNetwork, self).__init__()
+        self.fc = nn.Linear(input_size, output_size)
+        
+    def forward(self, x):
+        return self.fc(x)
+
+model = QNetwork(num_states, num_actions)
+optimizer = optim.SGD(model.parameters(), lr=0.1)
+loss_fn = nn.MSELoss()
+
+# Training hyperparameters
+gamma = 0.9
+epsilon = 0.2
+episodes = 2000
+
+# Training loop
+for _ in range(episodes):
+    state = random.choice(nested_states)
+    state_tensor = state_to_tensor(state)
+    
+    if random.random() < epsilon:
+        action_idx = random.choice(range(num_actions))  # explore
+    else:
+        with torch.no_grad():
+            q_values = model(state_tensor)
+            action_idx = torch.argmax(q_values).item()    # exploit
+
+    action = actions[action_idx]
+    reward = get_reward(state, action)
+    
+    # Next state
+    next_state = random.choice(nested_states)
+    next_state_tensor = state_to_tensor(next_state)
+    
+    with torch.no_grad():
+        next_q_values = model(next_state_tensor)
+        target_q = reward + gamma * torch.max(next_q_values).item()
+    
+    q_values = model(state_tensor)
+    current_q = q_values[action_idx]
+    
+    loss = loss_fn(current_q, torch.tensor(target_q))
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+# Save the model
+torch.save(model.state_dict(), "nested_q_network_model.pth")
+
+# Predict best action for a nested state
+def predict_best_action(state):
+    state_tensor = state_to_tensor(state)
+    with torch.no_grad():
+        q_values = model(state_tensor)
+    best_action_idx = torch.argmax(q_values).item()
+    return actions[best_action_idx]
+
+# Example prediction
+example_state = ('home_page', 'new_user', 'morning')
+print(f"Best action for {example_state}: {predict_best_action(example_state)}")
