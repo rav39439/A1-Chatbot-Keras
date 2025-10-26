@@ -1,0 +1,288 @@
+
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+from collections import defaultdict
+import string
+import tensorflow as tf
+import re
+import os
+import time
+from tensorflow import keras
+from tensorflow.keras.layers import Dense, Input
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.models import Model
+from tensorflow.keras.callbacks import ModelCheckpoint
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.model_selection import train_test_split
+
+# ENCODER_LEN = 200
+# DECODER_LEN = 70
+# BATCH_SIZE = 36
+# BUFFER_SIZE = BATCH_SIZE*8
+# ENCODER_LEN = 140
+# DECODER_LEN = 100
+# BATCH_SIZE = 16
+# BUFFER_SIZE = BATCH_SIZE * 8
+# news = pd.read_csv("/kaggle/input/summerization-sample/summarization_100000.csv")
+# news = news.head(20000)
+# print(news
+# print(news.columns)
+
+
+import tensorflow as tf
+import numpy as np
+import re
+
+# -------------------------
+# Parameters
+# -------------------------
+# seq_len = 20  # max length of input sequences
+# BATCH_SIZE = 32
+# BUFFER_SIZE = 10000
+# EMBED_DIM = 128
+# NUM_HEADS = 4
+# DFF = 512
+# NUM_LAYERS = 3
+# DROPOUT = 0.1
+# EPOCHS = 10
+SEQ_LEN = 4        # number of tokens in decoder input (window size for model input)
+WINDOW = SEQ_LEN + 1    # we create windows of length SEQ_LEN+1 then split to input/target
+BATCH_SIZE = 32
+BUFFER_SIZE = 20000
+EMBED_DIM = 256
+NUM_HEADS = 8
+DFF = 1024
+NUM_LAYERS = 4
+DROPOUT = 0.1
+EPOCHS = 6
+LR = 3e-4
+
+# -------------------------
+# 1. Read text file
+# -------------------------
+
+
+
+# --------------------------transformer---------------------------------------
+
+def get_angles(pos, i, d_model):
+    angle_rates = 1 / np.power(10000, (2 * (i//2)) / np.float32(d_model))
+    return pos * angle_rates
+
+def positional_encoding(position, d_model):
+    angle_rads = get_angles(np.arange(position)[:, np.newaxis],
+                            np.arange(d_model)[np.newaxis, :],
+                            d_model)
+    angle_rads[:, 0::2] = np.sin(angle_rads[:, 0::2])
+    angle_rads[:, 1::2] = np.cos(angle_rads[:, 1::2])
+    pos_encoding = angle_rads[np.newaxis, ...].astype(np.float32)
+    return tf.constant(pos_encoding)
+
+def create_look_ahead_mask(size):
+    mask = 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
+    return mask  # (seq_len, seq_len)
+
+# -------------------------
+# MHA and FFN (same as you had)
+# -------------------------
+def scaled_dot_product_attention(q, k, v, mask):
+    matmul_qk = tf.matmul(q, k, transpose_b=True)
+    dk = tf.cast(tf.shape(k)[-1], tf.float32)
+    scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
+    if mask is not None:
+        # mask shape should broadcast to (..., seq_len_q, seq_len_k)
+        scaled_attention_logits += (mask * -1e9)
+    attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)
+    output = tf.matmul(attention_weights, v)
+    return output, attention_weights
+
+class MultiHeadAttention(tf.keras.layers.Layer):
+    def __init__(self, d_model, num_heads):
+        super().__init__()
+        assert d_model % num_heads == 0
+        self.num_heads = num_heads
+        self.d_model = d_model
+        self.depth = d_model // num_heads
+        self.wq = tf.keras.layers.Dense(d_model)
+        self.wk = tf.keras.layers.Dense(d_model)
+        self.wv = tf.keras.layers.Dense(d_model)
+        self.dense = tf.keras.layers.Dense(d_model)
+
+    def split_heads(self, x, batch_size):
+        x = tf.reshape(x, (batch_size, -1, self.num_heads, self.depth))
+        return tf.transpose(x, perm=[0, 2, 1, 3])
+
+    def call(self, v, k, q, mask):
+        batch_size = tf.shape(q)[0]
+        q = self.wq(q); k = self.wk(k); v = self.wv(v)
+        q = self.split_heads(q, batch_size)
+        k = self.split_heads(k, batch_size)
+        v = self.split_heads(v, batch_size)
+        scaled_attention, attn_weights = scaled_dot_product_attention(q, k, v, mask)
+        scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
+        concat = tf.reshape(scaled_attention, (batch_size, -1, self.d_model))
+        out = self.dense(concat)
+        return out, attn_weights
+
+def point_wise_feed_forward_network(d_model, dff):
+    return tf.keras.Sequential([
+        tf.keras.layers.Dense(dff, activation=tf.nn.gelu),
+        tf.keras.layers.Dense(d_model)
+    ])
+
+
+class DecoderOnlyLayer(tf.keras.layers.Layer):
+    """Single decoder-only layer: masked self-attention + feedforward"""
+    def __init__(self, d_model, num_heads, dff, rate=0.05):
+        super(DecoderOnlyLayer, self).__init__()
+        self.mha = MultiHeadAttention(d_model, num_heads)
+        self.ffn = point_wise_feed_forward_network(d_model, dff)
+
+        # Pre-LayerNorm
+        self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+
+        # Dropout
+        self.dropout1 = tf.keras.layers.Dropout(rate)
+        self.dropout2 = tf.keras.layers.Dropout(rate)
+
+    def call(self, x, training, look_ahead_mask=None):
+        # Pre-norm before masked self-attention
+        x_norm = self.layernorm1(x)
+        attn_output, _ = self.mha(x_norm, x_norm, x_norm, look_ahead_mask)
+        attn_output = self.dropout1(attn_output, training=training)
+        out1 = x + attn_output
+
+        # Pre-norm before FFN
+        out1_norm = self.layernorm2(out1)
+        ffn_output = self.ffn(out1_norm)
+        ffn_output = self.dropout2(ffn_output, training=training)
+        out2 = out1 + ffn_output
+
+        return out2
+
+
+class DecoderOnlyTransformer(tf.keras.Model):
+    """Decoder-only Transformer for next-token prediction"""
+    def __init__(self, num_layers, d_model, num_heads, dff, vocab_size, maximum_position_encoding, rate=0.05):
+        super(DecoderOnlyTransformer, self).__init__()
+
+        self.d_model = d_model
+        self.num_layers = num_layers
+
+        self.embedding = tf.keras.layers.Embedding(vocab_size, d_model)
+        self.pos_encoding = positional_encoding(maximum_position_encoding, d_model)
+
+        self.dec_layers = [DecoderOnlyLayer(d_model, num_heads, dff, rate) for _ in range(num_layers)]
+        self.dropout = tf.keras.layers.Dropout(rate)
+        self.final_layer = tf.keras.layers.Dense(vocab_size)
+
+    def call(self, x, training, look_ahead_mask=None):
+        seq_len = tf.shape(x)[1]
+
+        x = self.embedding(x)
+        x *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
+        x += self.pos_encoding[:, :seq_len, :]
+
+        x = self.dropout(x, training=training)
+
+        for i in range(self.num_layers):
+            x = self.dec_layers[i](x, training=training, look_ahead_mask=look_ahead_mask)
+
+        # Predict logits for next token
+        logits = self.final_layer(x)  # (batch_size, seq_len, vocab_size)
+        return logits
+
+
+#-----------------------------------------------------------------------------------
+
+
+
+import os
+import shutil
+DATA_FILE='/kaggle/input/document-data/data.txt'
+with open(DATA_FILE, "r", encoding="utf-8") as f:
+    text = f.read().lower()
+
+# Basic cleaning (customize as needed)
+text = re.sub(r"[^a-zA-Z0-9\s\.\,\?\!\;:\-\'\"]+", " ", text)
+text = re.sub(r"\s+", " ", text).strip()
+# Tokenizer (word-level; you can use SentencePiece or subword tokenizers for production)
+tokenizer = tf.keras.preprocessing.text.Tokenizer(filters='', oov_token='<OOV>')
+tokenizer.fit_on_texts([text])
+vocab_size = len(tokenizer.word_index) + 1
+
+# Convert full text into a long sequence of token ids
+token_ids = tokenizer.texts_to_sequences([text])[0]
+token_ids = np.array(token_ids, dtype=np.int32)
+
+# # Create sliding windows of length WINDOW = SEQ_LEN+1
+windows = []
+for start in range(0, len(token_ids) - WINDOW + 1, 1):  # step=1 for maximum data
+    window = token_ids[start:start + WINDOW]
+    windows.append(window)
+windows = np.array(windows, dtype=np.int32)
+print("Number of windows:", windows.shape[0])
+
+
+# Split windows into inputs (first SEQ_LEN) and targets (last SEQ_LEN)
+inputs = windows[:, :-1]   # shape (N, SEQ_LEN)
+targets = windows[:, 1:]   # shape (N, SEQ_LEN)
+# for i in range(10):
+#     print(f"\n=== Sample {i+1} ===")
+#     print("Input token IDs:", inputs[i])
+#     print("Target token IDs:", targets[i])
+
+#     # Decode back to text for readability
+#     input_text = " ".join([tokenizer.index_word.get(id, "<OOV>") for id in inputs[i]])
+#     target_text = " ".join([tokenizer.index_word.get(id, "<OOV>") for id in targets[i]])
+#     print("Input text :", input_text)
+#     print("Target text:", target_text)
+# # Create tf.data.Dataset
+dataset = tf.data.Dataset.from_tensor_slices((inputs, targets))
+dataset = dataset.shuffle(BUFFER_SIZE).batch(BATCH_SIZE, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
+
+# # -------------------------
+# # Build, compile, train
+# # -------------------------
+model = DecoderOnlyTransformer(
+    num_layers=NUM_LAYERS,
+    d_model=EMBED_DIM,
+    num_heads=NUM_HEADS,
+    dff=DFF,
+    vocab_size=vocab_size,
+    maximum_position_encoding=SEQ_LEN,
+    rate=DROPOUT
+)
+
+loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+optimizer = tf.keras.optimizers.Adam(learning_rate=LR)
+model.compile(optimizer=optimizer, loss=loss_fn, metrics=['sparse_categorical_accuracy'])
+model.fit(dataset, epochs=EPOCHS)
+print(model.summary())
+
+def generate_text_greedy(model, tokenizer, prompt, max_gen=40):
+    # tokenise prompt
+    token_list = tokenizer.texts_to_sequences([prompt])[0]
+    # if prompt longer than SEQ_LEN, keep last SEQ_LEN tokens
+    if len(token_list) > SEQ_LEN:
+        token_list = token_list[-SEQ_LEN:]
+    # pad on left to length SEQ_LEN
+    pad_len = SEQ_LEN - len(token_list)
+    input_seq = [0] * pad_len + token_list
+    input_seq = tf.expand_dims(input_seq, 0)  # (1, SEQ_LEN)
+
+    generated = []
+    for _ in range(max_gen):
+        logits = model(input_seq, training=False)  # (1, SEQ_LEN, vocab)
+        last_logits = logits[:, -1, :]            # (1, vocab)
+        next_id = tf.argmax(last_logits, axis=-1).numpy()[0]
+        generated.append(tokenizer.index_word.get(next_id, '<OOV>'))
+        # append and shift
+        input_seq = tf.concat([input_seq[:, 1:], tf.expand_dims([next_id], 0)], axis=-1)
+    return prompt + " " + " ".join(generated)
+
+# Example:
+print(generate_text_greedy(model, tokenizer, "The farmers in india", max_gen=20))
