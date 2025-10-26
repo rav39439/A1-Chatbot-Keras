@@ -423,4 +423,1129 @@ ontap_log = """[INFO] ==========================================================
 
 
 
+//////////////////////alternative using cache///////////
 
+
+# from dotenv import load_dotenv
+# from agents import Agent, Runner, trace
+# from agents.mcp import MCPServerStdio
+# import os
+# from IPython.display import Markdown, display
+# from datetime import datetime
+# load_dotenv(override=True)
+# import asyncio
+# # from agents.models.ollama import OllamaModel
+
+# params = {
+#     "command": "npx",
+#     "args": ["-y", "mcp-memory-libsql"],
+#     "env": {"LIBSQL_URL": "file:./memory/ed.db"}
+# }
+# instructions = "You are able to search the web for information and briefly summarize the takeaways."
+# request = f"Please research the latest news on Amazon stock price and briefly summarize its outlook. \
+# For context, the current date is {datetime.now().strftime('%Y-%m-%d')}"
+# # model = "llama3"
+# from ollamamodel import OllamaModel
+
+# my_model = OllamaModel(model_name="llama3.2")
+
+# # response = await model.run("Hello, who are you?")
+# # print(response)
+# async def main():
+#     async with MCPServerStdio(params=params, client_session_timeout_seconds=30) as server:
+#         mcp_tools = await server.list_tools()
+#         # print("Tools available:", mcp_tools)
+        
+#     async with MCPServerStdio(params=params, client_session_timeout_seconds=30) as mcp_server:
+#         agent = Agent(name="agent", instructions=instructions, model="llama3.2", mcp_servers=[mcp_server])
+#         with trace("conversation"):
+#           result = await Runner.run(agent, request)
+#         display(Markdown(result.final_output))
+
+
+# if __name__ == "__main__":
+#     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+#     asyncio.run(main())
+
+
+#-------------------------------------------------------
+
+
+# from typing import Any
+# import hashlib
+# from loguru import logger
+# from mcp.server.fastmcp import FastMCP
+
+# # Initialize FastMCP server
+# mcp = FastMCP("public-demo")
+
+# @mcp.tool()
+# def generate_md5_hash(input_str: str) -> str:
+#     # Create an md5 hash object
+#     logger.info(f"Generating MD5 hash for: {input_str}")
+#     md5_hash = hashlib.md5()
+    
+#     # Update the hash object with the bytes of the input string
+#     md5_hash.update(input_str.encode('utf-8'))
+    
+#     # Return the hexadecimal representation of the digest
+#     return md5_hash.hexdigest()
+
+# @mcp.tool()
+# def count_characters(input_str: str) -> int:
+#     # Count number of characters in the input string
+#     logger.info(f"Counting characters in: {input_str}")
+#     return len(input_str)
+
+
+# @mcp.tool()
+# def get_first_half(input_str: str) -> str:
+#     # Calculate the midpoint of the string
+#     logger.info(f"Getting first half of: {input_str}")
+#     midpoint = len(input_str) // 2
+    
+#     # Return the first half of the string
+#     return input_str[:midpoint]
+
+
+# if __name__ == "__main__":
+#     # Initialize and run the server
+#     mcp.run(transport='stdio')
+
+#-------------------------------------------------------------------------
+
+# from autogen_ext.tools.langchain import LangChainToolAdapter
+
+# # LangChain tools:
+
+# from langchain_community.utilities import GoogleSerperAPIWrapper
+# from langchain_community.agent_toolkits import FileManagementToolkit
+# from langchain.agents import Tool
+# from dotenv import load_dotenv
+# from autogen_ext.models.ollama import OllamaChatCompletionClient
+# from autogen_agentchat.agents import AssistantAgent
+# from autogen_agentchat.messages import TextMessage, MultiModalMessage
+# from autogen_core import CancellationToken
+
+# load_dotenv()
+
+# prompt = """Your task is to find a one-way non-stop flight from Bangalore to Patna in India in November 2025.
+# First search online for promising deals.
+# Next, write all the deals to a file called flights.md with full details.
+# Finally, select the one you think is best and reply with a short summary.
+# Reply with the selected flight only, and only after you have written the details to the file."""
+# import os
+# # os.environ["SERPER_API_KEY"] = "YOUR_SERPER_API_KEY"
+# load_dotenv()
+# message = TextMessage(content=prompt, source="user")
+
+# serper = GoogleSerperAPIWrapper(serper_api_key=os.environ["SERPER_API_KEY"])
+# langchain_serper =Tool(name="internet_search", func=serper.run, description="useful for when you need to search the internet")
+# autogen_serper = LangChainToolAdapter(langchain_serper)
+# autogen_tools = [autogen_serper]
+
+# langchain_file_management_tools = FileManagementToolkit(root_dir="sandbox").get_tools()
+# for tool in langchain_file_management_tools:
+#     autogen_tools.append(LangChainToolAdapter(tool))
+
+# for tool in autogen_tools:
+#     print(tool.name, tool.description)
+# ollamamodel_client = OllamaChatCompletionClient(model="llama3.2")
+# agent = AssistantAgent(name="searcher", model_client=ollamamodel_client, tools=autogen_tools, reflect_on_tool_use=True)
+
+# async def runtask():
+#     result = await agent.on_messages([message], cancellation_token=CancellationToken())
+
+#     for msg in result.inner_messages:
+#         print(msg.content)
+
+#     display(Markdown(result.chat_message.content))
+# import asyncio
+# if __name__ == "__main__":
+#     # For Windows, uncomment if needed
+#     # asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+#     asyncio.run(runtask())
+
+#---------------------------------------------------------------------------------
+
+
+
+from typing import Annotated
+from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from dotenv import load_dotenv
+# from IPython.display import Image, display
+# import gradio as gr
+from langgraph.prebuilt import ToolNode, tools_condition
+import requests
+import os
+# from langchain.agents import Tool
+from langchain_core.tools import tool
+
+from typing import Annotated, TypedDict, List, Dict, Any, Optional
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+# from langchain_openai import ChatOpenAI
+# from langgraph.checkpoint.memory import MemorySaver
+from langchain_ollama import ChatOllama
+
+
+class State(TypedDict):
+    
+    messages: Annotated[list, add_messages]
+
+
+
+class WorkflowState(TypedDict):
+    user_input: str
+    defectdescription:Optional[Dict[str, Any]]
+    defect_type: Optional[str]
+    classification_reason: Optional[str]
+    tool_output: Optional[str]
+    final_output: Optional[str]
+    definitions:Optional[str]
+
+
+
+import requests
+import os
+
+SERPER_API_KEY = os.getenv("SERPER_API_KEY")
+SERPER_SEARCH_URL = "https://google.serper.dev/search"
+
+def serper_tool(query: str) -> str:
+    headers = {
+        "X-API-KEY": SERPER_API_KEY,
+        "Content-Type": "application/json"
+    }
+    json_payload = {
+        "q": query,
+        "num": 1  # number of results to fetch
+    }
+    response = requests.post(SERPER_SEARCH_URL, headers=headers, json=json_payload)
+    if response.status_code == 200:
+        data = response.json()
+        # Extract snippet or description from first result
+        try:
+            snippet = data["organic"][0]["snippet"]
+            return snippet
+        except (KeyError, IndexError):
+            return "No relevant definitions found."
+    else:
+        return f"Search API error: {response.status_code}"
+
+
+def fetch_definitions_node(state: WorkflowState) -> WorkflowState:
+    # We'll ask Serper for defect definitions once per session or call
+    query = "Definitions of defect types: test-script defect, CLI defect, client defect, JIRA defect, system defect, log parser defect"
+    definitions = serper_tool(query)
+    state["definitions"] = definitions
+    return state
+
+# =========================================================
+# 2. Define Base LLMs
+# =========================================================
+from langchain_community.chat_models import ChatOllama
+from langchain.globals import set_llm_cache
+from langchain.cache import InMemoryCache
+
+# Set a global in-memory cache
+set_llm_cache(InMemoryCache())
+
+# Initialize ChatOllama with caching enabled
+classifier_llm = ChatOllama(model="llama3.2", cache=True)
+
+# summarizer_llm = ChatOllama(model="llama3.2", temperature=0.3)
+
+
+def parse_ontap_log(state:WorkflowState) -> WorkflowState:
+    prompt = f"""
+    You are an expert ONTAP log parser. Your task is to read a raw ONTAP failed test-case log and extract exactly the following key variables:
+
+    1. Error_Message
+    2. Error_Code
+    3. Subsystem
+    4. Command
+    5. Expected_Result
+    6. Actual_Result
+    7. Cluster
+    8. Node
+
+    Instructions:
+    - Output **only valid JSON**.
+    - Do **not** add any text, explanation, code fences (```) or markdown.
+    - Do **not** include any titles, descriptions, or extra commentary.
+    - Use default value "Not Specified" if a field is missing.
+
+    Format:
+    {{
+    "Error_Message": "...",
+    "Error_Code": "...",
+    "Subsystem": "...",
+    "Command": "...",
+    "Expected_Result": "...",
+    "Actual_Result": "...",
+    "Cluster": "...",
+    "Node": "..."
+    }}
+
+    Log to parse:
+    {state['user_input']}
+    """ 
+    response=classifier_llm.invoke(prompt)
+    state["defectdescription"]=json.loads(response.content)
+    
+
+    return state
+
+# =========================================================
+# 3. Define Tools
+# =========================================================
+def client_agent(text: str):
+    return f"[Client-Agent] Handling client defect: {text}"
+
+def test_script_agent(text: str):
+    return f"[Test-Script-Agent] Fixing test script issue: {text}"
+
+def jira_agent(text: str):
+    return f"[JIRA-Agent] Updating JIRA for defect: {text}"
+
+def system_agent(text: str):
+    return f"[System-Agent] Investigating system-level defect: {text}"
+
+def cli_agent(state: WorkflowState) -> WorkflowState:
+    # if not state.get("defect_type") or "No suitable tool" in state["defect_type"]:
+    #     state["final_output"] = (
+    #         "The defect could not be classified or no tool was applicable.\n"
+    #         f"Reason: {state.get('classification_reason')}"
+    #     )
+    #     return state
+
+    summary_prompt = f"""
+    You are an expert ONTAP support agent. Your task is to analyze a failed test-case that has been identified as a CLI defect.
+
+    Based on the following defect type and its context:
+    {state['defect_type']}
+
+    Perform the following:
+
+    1. Identify the specific type of CLI defect (e.g., syntax error, parser bug, unexpected crash, invalid parameter handling).
+    2. Explain clearly why this defect occurs and the underlying cause.
+    3. Provide actionable steps to debug the defect.
+    4. Suggest how to resolve or mitigate this particular CLI defect.
+
+    Instructions:
+    - Provide a detailed, user-friendly explanation.
+    - Organize the output with clear headings:
+        - CLI Defect Type:
+        - Defect Details:
+        - Debug Steps:
+        - Resolution:
+    - Do not include unrelated information.
+
+    Tool output / defect context to reference:
+    {state.get("defectdescription", "No detailed defect description available.")}
+    """
+    result = classifier_llm.invoke(summary_prompt)
+    state["final_output"] = result.content
+    return state
+
+
+def log_parser_agent(state: WorkflowState) -> WorkflowState:
+   
+    summary_prompt = f"""
+    Summarize the following tool output for a user-friendly response:
+    {state["defect_type"]}
+    """
+    result = classifier_llm.invoke(summary_prompt)
+    state["final_output"] = result.content
+    return state
+
+
+# Tool mapping
+TOOL_MAP = {
+    "client defect": client_agent,
+    "test-script defect": test_script_agent,
+    "jira defect": jira_agent,
+    "system defect": system_agent,
+    "cli defect": cli_agent,
+    "log parser defect": log_parser_agent,
+    
+}
+
+# =========================================================
+# 4. Define Workflow Nodes
+# =========================================================
+
+# --- Node 1: Classification Agent ---
+
+import json
+import re
+def extract_definitions_node(state: WorkflowState) -> WorkflowState:
+    prompt = """
+  
+    """
+
+    messages = [
+    {"role": "system", "content": "You are a helpful software testing assistant."},
+    {"role": "user", "content": """
+        Provide concise definitions for the following defect types in software testing:
+    - test-script defect
+    - CLI defect
+    - client defect
+    - JIRA defect
+    - system defect
+    - log parser defect
+    
+    Respond in JSON format like this:
+    {
+      "test-script defect": "...definition...",
+      "CLI defect": "...definition...",
+      "client defect": "...definition...",
+      "JIRA defect": "...definition...",
+      "system defect": "...definition...",
+      "log parser defect": "...definition..."
+    }
+    """}
+]
+    response = classifier_llm.invoke(messages)
+    text=response.content
+
+    match = re.search(r"```(.*?)```", text, re.DOTALL)
+    if match:
+        json_str = match.group(1)
+    else:
+        # Try to extract the first JSON-like block starting with '{' and ending with '}'
+        match = re.search(r"(\{.*\})", text, re.DOTALL)
+        json_str = match.group(1) if match else text
+
+    # Clean up any stray markdown or whitespace
+    json_str = json_str.strip()
+
+
+    # try:
+    #     definitions = json.loads(response.content)
+    # except Exception:
+    #     definitions = {
+    #         "test-script-defect": "No definition available"
+    #     }
+    state["definitions"] =  json.loads(json_str)
+    # print(definitions)
+    return state
+
+def classify_node(state: WorkflowState) -> WorkflowState:
+    definitions = state.get("definitions", {})
+    definitions_str = "\n".join([f"{k}: {v}" for k, v in definitions.items()])
+    system_prompt = f"""
+   You are a defect classification agent with extensive knowledge about software defects.
+    Classify the defect into one of the following types using your own knowledge first.
+
+    Defect types to classify into:
+    - test-script defect
+    - CLI defect
+    - client defect
+    - JIRA defect
+    - system defect
+    - log parser defect
+
+    You are given the following parsed defect description in JSON format:
+    {state['defectdescription']}
+
+    Optionally, you can also refer to these definitions if provided:
+    {definitions_str if definitions_str else "No definitions provided."}
+
+    Use the parsed defect data to help your classification, but prioritize your knowledge of software defects.
+    Respond ONLY in JSON format like this:
+    {{"defect_type": "...", "reason": "..."}}
+    """
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": state["user_input"]}
+    ]
+    result = classifier_llm.invoke(messages)
+    
+    import json
+    try:
+        data = json.loads(result.content)
+        defect_type = data.get("defect_type", "").lower().strip()
+        reason = data.get("reason", "")
+    except Exception:
+        defect_type, reason = "unknown", "Could not parse classification."
+    
+    state["defect_type"] = defect_type
+    state["classification_reason"] = reason
+    return state
+
+# --- Node 2: Tool Execution Node ---
+def tool_node(state: WorkflowState) -> WorkflowState:
+    defect_type = state.get("defect_type", "")
+    tool_func = TOOL_MAP.get(defect_type)
+
+    if tool_func:
+        output = tool_func(state)
+    else:
+        output = f"No suitable tool found for defect type: '{defect_type}'."
+    state["tool_output"] = output
+    return state
+
+
+# --- Node 3: Summarizer Node ---
+# def summarizer_node(state: WorkflowState) -> WorkflowState:
+# if not state.get("defect_type") or "No suitable tool" in state["defect_type"]:
+    #     state["final_output"] = (
+    #         "The defect could not be classified or no tool was applicable.\n"
+    #         f"Reason: {state.get('classification_reason')}"
+    #     )
+    #     return state
+
+    # summary_prompt = f"""
+    # Summarize the following tool output for a user-friendly response:
+    # {state["defect_type"]}
+    # """
+    # result = summarizer_llm.invoke(summary_prompt)
+    # state["final_output"] = result.content
+    # return state
+   
+
+
+graph = StateGraph(WorkflowState)
+# graph.add_node("extract_definitions", extract_definitions_node)
+
+graph.add_node("classify", classify_node)
+graph.add_node("run_tool", tool_node)
+graph.add_node("parse_ontap_log", parse_ontap_log)
+
+# Connect workflow
+# graph.set_entry_point("extract_definitions")
+
+graph.set_entry_point("parse_ontap_log")
+graph.add_edge("parse_ontap_log", "classify")
+
+graph.add_edge("classify", "run_tool")
+graph.add_edge("run_tool", END)
+# graph.add_edge("summarize", END)
+
+# Compile the workflow
+workflow = graph.compile()
+
+
+if __name__ == "__main__":
+    user_query = "Cannot read property 'value' of undefined"
+    ontp_lg="""[INFO] ===============================================================
+[INFO] Test Case: test_vol_create_with_cli_syntax
+[INFO] Description: Verify volume creation with valid parameters
+[INFO] ===============================================================
+[INFO] Cluster: cluster1
+[INFO] Node: cluster1-02
+[INFO] Executing command: volume create -vserver svm_data -volume vol_test02 -aggregate aggr1 -size 10GB
+[DEBUG] Command issued to mgwd at 10:45:10.512
+[INFO] Waiting for job completion...
+[ERROR] Job ID: 4820 failed with status: failed
+[ERROR] Job Error:
+        Error: command failed: Unexpected CLI syntax error. The parameters provided are valid but the CLI parser crashed.
+        Suggestion: Retry command with the same parameters; escalate if it fails again.
+[INFO] ===============================================================
+[FAIL] Test Result: FAILED
+[FAIL] Reason: CLI parser defect caused command failure
+[INFO] ===============================================================
+"""
+    result = workflow.invoke({"user_input": ontp_lg})
+    # # samplestate = WorkflowState()
+    # # updated_state = extract_definitions_node(samplestate)
+    # # print(updated_state)
+
+    
+    print("\n==== WORKFLOW EXECUTION RESULT ====")
+    print("Defect Type:", result["defect_type"])
+    print("Classification Reason:", result["classification_reason"])
+    # print("Tool Output:", result["tool_output"])
+    print("Final Output:", result["final_output"])
+#-------------------------------------------------------------------------------------------------
+
+
+
+
+# Example usage
+ontap_log = """[INFO] ===============================================================
+[INFO] Test Case: test_vol_create_with_qos_policy
+[INFO] Description: Verify volume creation with QoS policy group attached
+[INFO] ===============================================================
+[INFO] Cluster: cluster1
+[INFO] Node: cluster1-01
+[INFO] Executing command: volume create -vserver svm_data -volume vol_test01 -aggregate aggr1 -size 10GB -qos-policy-group qos_medium
+[DEBUG] Command issued to mgwd at 10:32:14.122
+[INFO] Waiting for job completion...
+[ERROR] Job ID: 4715 failed with status: failed
+[ERROR] Job Error:
+        Error: command failed: Unable to create volume "vol_test01" on aggregate "aggr1".
+        Reason: Aggregate aggr1 does not have sufficient space for volume creation.
+        Suggestion: Add more disks or free space in the aggregate, then retry.
+
+[INFO] Collecting diagnostics...
+[INFO] > volume show -vserver svm_data -fields size,available,qos-policy-group
+[INFO] > qos policy-group show -policy-group qos_medium
+[INFO] > event log show -time > "10/24/2025 10:30:00"
+[DEBUG] Event Log Extract:
+        10/24/2025 10:32:14  ERROR  wafl.vol.create.failed: Volume create failed: Not enough space in aggregate aggr1.
+        10/24/2025 10:32:15  INFO   job.terminate: Job ID 4715 terminated with status failed.
+
+[FAIL] Test Result: FAILED
+[FAIL] Reason: Volume creation failed due to insufficient aggregate space
+[INFO] Duration: 00:00:11
+[INFO] ===============================================================
+"""
+
+# parsed = parse_ontap_log(ontap_log)
+# print(json.dumps(parsed, indent=2))
+
+
+
+//////////////alternative using chat prmpt///////////////////
+
+
+# from dotenv import load_dotenv
+# from agents import Agent, Runner, trace
+# from agents.mcp import MCPServerStdio
+# import os
+# from IPython.display import Markdown, display
+# from datetime import datetime
+# load_dotenv(override=True)
+# import asyncio
+# # from agents.models.ollama import OllamaModel
+
+# params = {
+#     "command": "npx",
+#     "args": ["-y", "mcp-memory-libsql"],
+#     "env": {"LIBSQL_URL": "file:./memory/ed.db"}
+# }
+# instructions = "You are able to search the web for information and briefly summarize the takeaways."
+# request = f"Please research the latest news on Amazon stock price and briefly summarize its outlook. \
+# For context, the current date is {datetime.now().strftime('%Y-%m-%d')}"
+# # model = "llama3"
+# from ollamamodel import OllamaModel
+
+# my_model = OllamaModel(model_name="llama3.2")
+
+# # response = await model.run("Hello, who are you?")
+# # print(response)
+# async def main():
+#     async with MCPServerStdio(params=params, client_session_timeout_seconds=30) as server:
+#         mcp_tools = await server.list_tools()
+#         # print("Tools available:", mcp_tools)
+        
+#     async with MCPServerStdio(params=params, client_session_timeout_seconds=30) as mcp_server:
+#         agent = Agent(name="agent", instructions=instructions, model="llama3.2", mcp_servers=[mcp_server])
+#         with trace("conversation"):
+#           result = await Runner.run(agent, request)
+#         display(Markdown(result.final_output))
+
+
+# if __name__ == "__main__":
+#     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+#     asyncio.run(main())
+
+
+#-------------------------------------------------------
+
+
+# from typing import Any
+# import hashlib
+# from loguru import logger
+# from mcp.server.fastmcp import FastMCP
+
+# # Initialize FastMCP server
+# mcp = FastMCP("public-demo")
+
+# @mcp.tool()
+# def generate_md5_hash(input_str: str) -> str:
+#     # Create an md5 hash object
+#     logger.info(f"Generating MD5 hash for: {input_str}")
+#     md5_hash = hashlib.md5()
+    
+#     # Update the hash object with the bytes of the input string
+#     md5_hash.update(input_str.encode('utf-8'))
+    
+#     # Return the hexadecimal representation of the digest
+#     return md5_hash.hexdigest()
+
+# @mcp.tool()
+# def count_characters(input_str: str) -> int:
+#     # Count number of characters in the input string
+#     logger.info(f"Counting characters in: {input_str}")
+#     return len(input_str)
+
+
+# @mcp.tool()
+# def get_first_half(input_str: str) -> str:
+#     # Calculate the midpoint of the string
+#     logger.info(f"Getting first half of: {input_str}")
+#     midpoint = len(input_str) // 2
+    
+#     # Return the first half of the string
+#     return input_str[:midpoint]
+
+
+# if __name__ == "__main__":
+#     # Initialize and run the server
+#     mcp.run(transport='stdio')
+
+#-------------------------------------------------------------------------
+
+# from autogen_ext.tools.langchain import LangChainToolAdapter
+
+# # LangChain tools:
+
+# from langchain_community.utilities import GoogleSerperAPIWrapper
+# from langchain_community.agent_toolkits import FileManagementToolkit
+# from langchain.agents import Tool
+# from dotenv import load_dotenv
+# from autogen_ext.models.ollama import OllamaChatCompletionClient
+# from autogen_agentchat.agents import AssistantAgent
+# from autogen_agentchat.messages import TextMessage, MultiModalMessage
+# from autogen_core import CancellationToken
+
+# load_dotenv()
+
+# prompt = """Your task is to find a one-way non-stop flight from Bangalore to Patna in India in November 2025.
+# First search online for promising deals.
+# Next, write all the deals to a file called flights.md with full details.
+# Finally, select the one you think is best and reply with a short summary.
+# Reply with the selected flight only, and only after you have written the details to the file."""
+# import os
+# # os.environ["SERPER_API_KEY"] = "YOUR_SERPER_API_KEY"
+# load_dotenv()
+# message = TextMessage(content=prompt, source="user")
+
+# serper = GoogleSerperAPIWrapper(serper_api_key=os.environ["SERPER_API_KEY"])
+# langchain_serper =Tool(name="internet_search", func=serper.run, description="useful for when you need to search the internet")
+# autogen_serper = LangChainToolAdapter(langchain_serper)
+# autogen_tools = [autogen_serper]
+
+# langchain_file_management_tools = FileManagementToolkit(root_dir="sandbox").get_tools()
+# for tool in langchain_file_management_tools:
+#     autogen_tools.append(LangChainToolAdapter(tool))
+
+# for tool in autogen_tools:
+#     print(tool.name, tool.description)
+# ollamamodel_client = OllamaChatCompletionClient(model="llama3.2")
+# agent = AssistantAgent(name="searcher", model_client=ollamamodel_client, tools=autogen_tools, reflect_on_tool_use=True)
+
+# async def runtask():
+#     result = await agent.on_messages([message], cancellation_token=CancellationToken())
+
+#     for msg in result.inner_messages:
+#         print(msg.content)
+
+#     display(Markdown(result.chat_message.content))
+# import asyncio
+# if __name__ == "__main__":
+#     # For Windows, uncomment if needed
+#     # asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+#     asyncio.run(runtask())
+
+#---------------------------------------------------------------------------------
+
+
+
+from typing import Annotated
+from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from dotenv import load_dotenv
+# from IPython.display import Image, display
+# import gradio as gr
+from langgraph.prebuilt import ToolNode, tools_condition
+import requests
+import os
+# from langchain.agents import Tool
+from langchain_core.tools import tool
+import ollama
+
+from typing import Annotated, TypedDict, List, Dict, Any, Optional
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+# from langchain_openai import ChatOpenAI
+# from langgraph.checkpoint.memory import MemorySaver
+from langchain_ollama import ChatOllama
+
+
+class State(TypedDict):
+    
+    messages: Annotated[list, add_messages]
+
+
+
+class WorkflowState(TypedDict):
+    user_input: str
+    defectdescription:Optional[Dict[str, Any]]
+    defect_type: Optional[str]
+    classification_reason: Optional[str]
+    tool_output: Optional[str]
+    final_output: Optional[str]
+    definitions:Optional[str]
+
+
+
+import requests
+import os
+
+SERPER_API_KEY = os.getenv("SERPER_API_KEY")
+SERPER_SEARCH_URL = "https://google.serper.dev/search"
+
+def serper_tool(query: str) -> str:
+    headers = {
+        "X-API-KEY": SERPER_API_KEY,
+        "Content-Type": "application/json"
+    }
+    json_payload = {
+        "q": query,
+        "num": 1  # number of results to fetch
+    }
+    response = requests.post(SERPER_SEARCH_URL, headers=headers, json=json_payload)
+    if response.status_code == 200:
+        data = response.json()
+        # Extract snippet or description from first result
+        try:
+            snippet = data["organic"][0]["snippet"]
+            return snippet
+        except (KeyError, IndexError):
+            return "No relevant definitions found."
+    else:
+        return f"Search API error: {response.status_code}"
+
+
+def fetch_definitions_node(state: WorkflowState) -> WorkflowState:
+    # We'll ask Serper for defect definitions once per session or call
+    query = "Definitions of defect types: test-script defect, CLI defect, client defect, JIRA defect, system defect, log parser defect"
+    definitions = serper_tool(query)
+    state["definitions"] = definitions
+    return state
+
+# =========================================================
+# 2. Define Base LLMs
+# =========================================================
+classifier_llm = ChatOllama(model="llama3.2", temperature=0.6)
+# summarizer_llm = ChatOllama(model="llama3.2", temperature=0.3)
+
+
+def parse_ontap_log(state: WorkflowState) -> WorkflowState:
+    """
+    Parses a raw ONTAP failed test-case log using Ollama with caching enabled.
+    The system prompt is static (cached) and the log input is passed as user content.
+    """
+
+    # ✅ Static system prompt (cacheable)
+    system_prompt = (
+        "You are an expert ONTAP log parser. "
+        "Your job is to extract structured information from a raw failed test-case log. "
+        "Identify and return exactly these fields:\n"
+        "- Error_Message\n"
+        "- Error_Code\n"
+        "- Subsystem\n"
+        "- Command\n"
+        "- Expected_Result\n"
+        "- Actual_Result\n"
+        "- Cluster\n"
+        "- Node\n\n"
+        "Rules:\n"
+        "- Respond ONLY in valid JSON (no markdown, code fences, or extra text).\n"
+        "- If any field is missing, use 'Not Specified'.\n"
+        "- Ensure field names exactly match the list above."
+    )
+
+    user_query = f"Parse the following ONTAP log and extract the required fields:\n\n{state.get('user_input', 'No log provided.')}"
+
+    response = ollama.chat(
+        model="llama3.2",  # e.g., "llama3", "mistral"
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_query},
+        ],
+        options={"cache": True}
+    )
+
+    result = response["message"]["content"]
+
+    try:
+        parsed_data = json.loads(result)
+    except Exception:
+        parsed_data = {
+            "Error_Message": "Not Specified",
+            "Error_Code": "Not Specified",
+            "Subsystem": "Not Specified",
+            "Command": "Not Specified",
+            "Expected_Result": "Not Specified",
+            "Actual_Result": "Not Specified",
+            "Cluster": "Not Specified",
+            "Node": "Not Specified",
+            "_error": f"Could not parse model output: {result}"
+        }
+
+    state["defectdescription"] = parsed_data
+    return state
+
+# =========================================================
+# 3. Define Tools
+# =========================================================
+def client_agent(text: str):
+    return f"[Client-Agent] Handling client defect: {text}"
+
+def test_script_agent(text: str):
+    return f"[Test-Script-Agent] Fixing test script issue: {text}"
+
+def jira_agent(text: str):
+    return f"[JIRA-Agent] Updating JIRA for defect: {text}"
+
+def system_agent(text: str):
+    return f"[System-Agent] Investigating system-level defect: {text}"
+
+def cli_agent(state: WorkflowState) -> WorkflowState:
+    """
+    Analyze a CLI defect using Ollama with system prompt caching enabled.
+    The system prompt is static (cached) while the defect type and description are variable.
+    """
+
+    system_prompt = (
+        "You are an expert ONTAP support agent specializing in CLI defects. "
+        "Your job is to analyze a failed test case related to a CLI issue. "
+        "Based on the given defect details, identify the CLI defect type, explain the cause, "
+        "and provide clear debugging and resolution steps.\n\n"
+        "Respond in a structured format with these sections:\n"
+        "- CLI Defect Type:\n"
+        "- Defect Details:\n"
+        "- Debug Steps:\n"
+        "- Resolution:\n\n"
+        "Keep the explanation concise, actionable, and focused only on CLI-related issues."
+    )
+
+    user_prompt = f"""
+Defect Type: {state.get('defect_type', 'Unknown')}
+Defect Description (JSON): {state.get('defectdescription', 'No defect description provided.')}
+"""
+
+    response = ollama.chat(
+        model="llama3.2",  # e.g. "llama3" or "mistral"
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        options={"cache": True}
+    )
+
+    result = response["message"]["content"].strip()
+    state["final_output"] = result
+    return state
+
+
+def log_parser_agent(state: WorkflowState) -> WorkflowState:
+   
+    summary_prompt = f"""
+    Summarize the following tool output for a user-friendly response:
+    {state["defect_type"]}
+    """
+    result = classifier_llm.invoke(summary_prompt)
+    state["final_output"] = result.content
+    return state
+
+
+# Tool mapping
+TOOL_MAP = {
+    "client defect": client_agent,
+    "test-script defect": test_script_agent,
+    "jira defect": jira_agent,
+    "system defect": system_agent,
+    "cli defect": cli_agent,
+    "log parser defect": log_parser_agent,
+    
+}
+
+# =========================================================
+# 4. Define Workflow Nodes
+# =========================================================
+
+# --- Node 1: Classification Agent ---
+
+import json
+import re
+def extract_definitions_node(state: WorkflowState) -> WorkflowState:
+    prompt = """
+  
+    """
+
+    messages = [
+    {"role": "system", "content": "You are a helpful software testing assistant."},
+    {"role": "user", "content": """
+        Provide concise definitions for the following defect types in software testing:
+    - test-script defect
+    - CLI defect
+    - client defect
+    - JIRA defect
+    - system defect
+    - log parser defect
+    
+    Respond in JSON format like this:
+    {
+      "test-script defect": "...definition...",
+      "CLI defect": "...definition...",
+      "client defect": "...definition...",
+      "JIRA defect": "...definition...",
+      "system defect": "...definition...",
+      "log parser defect": "...definition..."
+    }
+    """}
+]
+    response = classifier_llm.invoke(messages)
+    text=response.content
+
+    match = re.search(r"```(.*?)```", text, re.DOTALL)
+    if match:
+        json_str = match.group(1)
+    else:
+        # Try to extract the first JSON-like block starting with '{' and ending with '}'
+        match = re.search(r"(\{.*\})", text, re.DOTALL)
+        json_str = match.group(1) if match else text
+
+    # Clean up any stray markdown or whitespace
+    json_str = json_str.strip()
+
+
+    # try:
+    #     definitions = json.loads(response.content)
+    # except Exception:
+    #     definitions = {
+    #         "test-script-defect": "No definition available"
+    #     }
+    state["definitions"] =  json.loads(json_str)
+    # print(definitions)
+    return state
+
+
+def classify_node(state: WorkflowState) -> WorkflowState:
+    """
+    Classify a software defect using Ollama with caching enabled.
+    The system prompt remains static (cached), while the defect description is variable.
+    """
+
+    system_prompt = (
+        "You are a highly experienced software defect classification agent. "
+        "Classify a defect into one of the following types:\n"
+        "- test-script defect\n"
+        "- CLI defect\n"
+        "- client defect\n"
+        "- JIRA defect\n"
+        "- system defect\n"
+        "- log parser defect\n\n"
+        "Use your own defect classification knowledge first. "
+        "The user will provide a parsed defect description in JSON. "
+        "Respond ONLY in valid JSON format like this:\n"
+        '{"defect_type": "...", "reason": "..."}'
+    )
+
+    defect_desc = state.get("defectdescription", "{}")
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Parsed defect description (JSON):\n{defect_desc}"}
+    ]
+
+    response = ollama.chat(
+        model="llama3.2",  # e.g., "llama3" or "mistral"
+        messages=messages,
+        options={"cache": True}
+    )
+
+    result = response["message"]["content"]
+    try:
+        data = json.loads(result)
+        defect_type = data.get("defect_type", "").lower().strip()
+        reason = data.get("reason", "").strip()
+    except Exception:
+        defect_type, reason = "unknown", f"Could not parse response: {result}"
+
+    state["defect_type"] = defect_type
+    state["classification_reason"] = reason
+    return state
+
+# --- Node 2: Tool Execution Node ---
+def tool_node(state: WorkflowState) -> WorkflowState:
+    defect_type = state.get("defect_type", "")
+    tool_func = TOOL_MAP.get(defect_type)
+
+    if tool_func:
+        output = tool_func(state)
+    else:
+        output = f"No suitable tool found for defect type: '{defect_type}'."
+    state["tool_output"] = output
+    return state
+
+
+# --- Node 3: Summarizer Node ---
+# def summarizer_node(state: WorkflowState) -> WorkflowState:
+# if not state.get("defect_type") or "No suitable tool" in state["defect_type"]:
+    #     state["final_output"] = (
+    #         "The defect could not be classified or no tool was applicable.\n"
+    #         f"Reason: {state.get('classification_reason')}"
+    #     )
+    #     return state
+
+    # summary_prompt = f"""
+    # Summarize the following tool output for a user-friendly response:
+    # {state["defect_type"]}
+    # """
+    # result = summarizer_llm.invoke(summary_prompt)
+    # state["final_output"] = result.content
+    # return state
+   
+
+
+graph = StateGraph(WorkflowState)
+# graph.add_node("extract_definitions", extract_definitions_node)
+
+graph.add_node("classify", classify_node)
+graph.add_node("run_tool", tool_node)
+graph.add_node("parse_ontap_log", parse_ontap_log)
+
+# Connect workflow
+# graph.set_entry_point("extract_definitions")
+
+graph.set_entry_point("parse_ontap_log")
+graph.add_edge("parse_ontap_log", "classify")
+
+graph.add_edge("classify", "run_tool")
+graph.add_edge("run_tool", END)
+# graph.add_edge("summarize", END)
+
+# Compile the workflow
+workflow = graph.compile()
+
+
+if __name__ == "__main__":
+    user_query = "Cannot read property 'value' of undefined"
+    ontp_lg="""[INFO] ===============================================================
+[INFO] Test Case: test_vol_create_with_cli_syntax
+[INFO] Description: Verify volume creation with valid parameters
+[INFO] ===============================================================
+[INFO] Cluster: cluster1
+[INFO] Node: cluster1-02
+[INFO] Executing command: volume create -vserver svm_data -volume vol_test02 -aggregate aggr1 -size 10GB
+[DEBUG] Command issued to mgwd at 10:45:10.512
+[INFO] Waiting for job completion...
+[ERROR] Job ID: 4820 failed with status: failed
+[ERROR] Job Error:
+        Error: command failed: Unexpected CLI syntax error. The parameters provided are valid but the CLI parser crashed.
+        Suggestion: Retry command with the same parameters; escalate if it fails again.
+[INFO] ===============================================================
+[FAIL] Test Result: FAILED
+[FAIL] Reason: CLI parser defect caused command failure
+[INFO] ===============================================================
+"""
+    result = workflow.invoke({"user_input": ontp_lg})
+    # # samplestate = WorkflowState()
+    # # updated_state = extract_definitions_node(samplestate)
+    # # print(updated_state)
+
+    
+    print("\n==== WORKFLOW EXECUTION RESULT ====")
+    print("Defect Type:", result["defect_type"])
+    print("Classification Reason:", result["classification_reason"])
+    # print("Tool Output:", result["tool_output"])
+    print("Final Output:", result["final_output"])
