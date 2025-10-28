@@ -1,0 +1,441 @@
+
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+from collections import defaultdict
+import string
+import tensorflow as tf
+import re
+import os
+import time
+from tensorflow import keras
+from tensorflow.keras.layers import Dense, Input
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.models import Model
+from tensorflow.keras.callbacks import ModelCheckpoint
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.model_selection import train_test_split
+
+ENCODER_LEN = 200
+DECODER_LEN = 70
+# BATCH_SIZE = 36
+# BUFFER_SIZE = BATCH_SIZE*8
+# ENCODER_LEN = 140
+# DECODER_LEN = 100
+# BATCH_SIZE = 16
+# BUFFER_SIZE = BATCH_SIZE * 8
+# news = pd.read_csv("/kaggle/input/summerization-sample/summarization_100000.csv")
+# news = news.head(20000)
+# print(news
+# print(news.columns)
+
+
+import tensorflow as tf
+import numpy as np
+import re
+
+# -------------------------
+# Parameters
+# -------------------------
+# seq_len = 20  # max length of input sequences
+# BATCH_SIZE = 32
+# BUFFER_SIZE = 10000
+# EMBED_DIM = 128
+# NUM_HEADS = 4
+# DFF = 512
+# NUM_LAYERS = 3
+# DROPOUT = 0.1
+# EPOCHS = 10
+SEQ_LEN = 256        # number of tokens in decoder input (window size for model input)
+WINDOW = SEQ_LEN + 1    # we create windows of length SEQ_LEN+1 then split to input/target
+BATCH_SIZE = 32
+BUFFER_SIZE = 20000
+EMBED_DIM = 256
+NUM_HEADS = 8
+DFF = 1024
+NUM_LAYERS = 4
+DROPOUT = 0.1
+EPOCHS = 20
+LR = 3e-4
+
+# -------------------------
+# 1. Read text file
+# -------------------------
+
+
+
+# --------------------------transformer---------------------------------------
+
+import tensorflow as tf
+import numpy as np
+import math
+
+# ----------------------
+# Positional encoding (sinusoidal
+# ----------------------
+# ----------------------
+# Rotary Embeddings (RoPE)
+# ----------------------
+def rotate_half(x):
+    x1, x2 = tf.split(x, 2, axis=-1)
+    return tf.concat([-x2, x1], axis=-1)
+
+def apply_rotary_pos_emb(q, k):
+    """
+    Apply rotary position embeddings (RoPE) to Q and K tensors.
+    Shapes:
+      q, k: (B, H, L, D)
+    """
+    seq_len = tf.shape(q)[2]
+    head_dim = tf.shape(q)[-1]
+    half_dim = head_dim // 2
+
+    # Create sinusoidal frequencies
+    inv_freq = 1.0 / (10000 ** (tf.range(0, half_dim, dtype=tf.float32) / tf.cast(half_dim, tf.float32)))
+    pos = tf.cast(tf.range(seq_len), tf.float32)
+    sinusoid_inp = tf.einsum('i,j->ij', pos, inv_freq)  # (seq_len, half_dim)
+    sin = tf.sin(sinusoid_inp)
+    cos = tf.cos(sinusoid_inp)
+
+    # Expand sin and cos to match batch/head dimensions
+    sin = tf.reshape(sin, (1, 1, seq_len, half_dim))
+    cos = tf.reshape(cos, (1, 1, seq_len, half_dim))
+
+    # Split q, k into 2 halves
+    q1, q2 = tf.split(q, 2, axis=-1)
+    k1, k2 = tf.split(k, 2, axis=-1)
+
+    # Apply rotation: [x1 * cos - x2 * sin, x2 * cos + x1 * sin]
+    q_rotated = tf.concat([q1 * cos - q2 * sin, q2 * cos + q1 * sin], axis=-1)
+    k_rotated = tf.concat([k1 * cos - k2 * sin, k2 * cos + k1 * sin], axis=-1)
+
+    return q_rotated, k_rotated
+
+
+def get_angles(pos, i, d_model):
+    angle_rates = 1 / np.power(10000, (2 * (i // 2)) / np.float32(d_model))
+    return pos * angle_rates
+
+def positional_encoding(position, d_model):
+    angle_rads = get_angles(np.arange(position)[:, np.newaxis],
+                            np.arange(d_model)[np.newaxis, :],
+                            d_model)
+    angle_rads[:, 0::2] = np.sin(angle_rads[:, 0::2])
+    angle_rads[:, 1::2] = np.cos(angle_rads[:, 1::2])
+    pos_encoding = angle_rads[np.newaxis, ...].astype(np.float32)  # (1, position, d_model)
+    return tf.constant(pos_encoding)  # shape (1, position, d_model)
+
+def create_look_ahead_mask(size):
+    # 1's for future positions (to be masked), 0's for allowed positions
+    mask = 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
+    return mask  # (seq_len, seq_len)
+
+# ----------------------
+# ALiBi helpers
+# ----------------------
+def get_alibi_slopes(n_heads: int):
+    def get_slopes_power_of_2(n):
+        start = 2 ** (-2 ** -(math.log2(n) - 3))
+        ratio = start
+        return [start * (ratio ** i) for i in range(n)]
+    if math.log2(n_heads).is_integer():
+        slopes = get_slopes_power_of_2(n_heads)
+    else:
+        m = 1 << (math.ceil(math.log2(n_heads)))
+        slopes = get_slopes_power_of_2(m)
+        slopes = slopes[:n_heads]
+    return tf.constant(slopes, dtype=tf.float32)  # (n_heads,)
+
+def build_alibi_bias(n_heads: int, seq_len: int):
+    slopes = get_alibi_slopes(n_heads)  # (n_heads,)
+    idxs = tf.range(seq_len, dtype=tf.int32)
+    dist = tf.cast(tf.expand_dims(idxs, 1) - tf.expand_dims(idxs, 0), tf.float32)  # (seq_len, seq_len)
+    bias = -tf.reshape(slopes, (n_heads, 1, 1)) * tf.reshape(dist, (1, seq_len, seq_len))  # (n_heads, seq_len, seq_len)
+    return bias
+
+# ----------------------
+# Naive causal self-attention (TensorFlow)
+# Q,K,V shapes: (batch, heads, seq_len, head_dim)
+# ----------------------
+def causal_self_attention_naive(Q, K, V, alibi_bias=None, mask_future=True):
+    d = tf.cast(tf.shape(Q)[-1], tf.float32)  # head dimension
+    scores = tf.matmul(Q, K, transpose_b=True) / tf.math.sqrt(d)  # (B, H, L, L)
+
+    if alibi_bias is not None:
+        # alibi_bias: (H, L, L) -> expand to (1, H, L, L)
+        scores += tf.expand_dims(alibi_bias, 0)
+
+    if mask_future:
+        L = tf.shape(Q)[2]
+        # lower triangular (including diagonal) -> 1 for allowed
+        lower = tf.linalg.band_part(tf.ones((L, L)), -1, 0)
+        mask = 1.0 - lower  # 1 for future tokens
+        mask = tf.reshape(mask, (1, 1, L, L))  # (1,1,L,L)
+        scores = scores - 1e9 * mask
+
+    attn = tf.nn.softmax(scores, axis=-1)  # (B,H,L,L)
+    out = tf.matmul(attn, V)               # (B,H,L,head_dim)
+    return out
+
+# ----------------------
+# Multi-head layer with ALiBi - returns only attention output
+# ----------------------
+class CausalSelfAttentionWithALiBi(tf.keras.layers.Layer):
+    def __init__(self, num_heads, head_dim, use_alibi=True, **kwargs):
+        super().__init__(**kwargs)
+        assert head_dim > 0 and num_heads > 0
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.use_alibi = use_alibi
+
+    def build(self, input_shape):
+        d_model = int(input_shape[-1])
+        self.Wq = self.add_weight(name="Wq", shape=(d_model, self.num_heads * self.head_dim),
+                          initializer="glorot_uniform")
+        self.Wk = self.add_weight(name="Wk", shape=(d_model, self.num_heads * self.head_dim),
+                                  initializer="glorot_uniform")
+        self.Wv = self.add_weight(name="Wv", shape=(d_model, self.num_heads * self.head_dim),
+                                  initializer="glorot_uniform")
+        self.Wo = self.add_weight(name="Wo", shape=(self.num_heads * self.head_dim, d_model),
+                                  initializer="glorot_uniform")
+
+    def call(self, x, mask_future=True):
+        # x: (B, L, d_model)
+        B = tf.shape(x)[0]
+        L = tf.shape(x)[1]
+        H = self.num_heads
+        D = self.head_dim
+
+        # Linear projections -> (B, L, H*D)
+        q = tf.matmul(x, self.Wq)
+        k = tf.matmul(x, self.Wk)
+        v = tf.matmul(x, self.Wv)
+
+        # reshape -> (B, L, H, D) -> transpose -> (B, H, L, D)
+        q = tf.transpose(tf.reshape(q, (B, L, H, D)), perm=[0, 2, 1, 3])
+        k = tf.transpose(tf.reshape(k, (B, L, H, D)), perm=[0, 2, 1, 3])
+        v = tf.transpose(tf.reshape(v, (B, L, H, D)), perm=[0, 2, 1, 3])
+        q, k = apply_rotary_pos_emb(q, k)
+
+        alibi_bias = None
+        if self.use_alibi:
+            # build ALiBi for this sequence (H, L, L)
+            alibi_bias = build_alibi_bias(H, L)
+
+        # Use naive (correct & graph-friendly) causal attention
+        attn_out = causal_self_attention_naive(q, k, v, alibi_bias=alibi_bias, mask_future=mask_future)  # (B,H,L,D)
+
+        # transpose back and combine heads -> (B, L, H*D)
+        attn_out = tf.transpose(attn_out, perm=[0, 2, 1, 3])
+        attn_out = tf.reshape(attn_out, (B, L, H * D))
+
+        # final linear
+        out = tf.matmul(attn_out, self.Wo)  # (B, L, d_model)
+        return out
+
+# ----------------------
+# Feed-forward network
+# ----------------------
+def point_wise_feed_forward_network(d_model, dff):
+    return tf.keras.Sequential([
+        tf.keras.layers.Dense(dff, activation=tf.nn.gelu),
+        tf.keras.layers.Dense(d_model)
+    ])
+
+# ----------------------
+# Decoder-only Transformer Layer
+# ----------------------
+class DecoderOnlyLayer(tf.keras.layers.Layer):
+    def __init__(self, d_model, num_heads, dff, rate=0.05, **kwargs):
+        super().__init__(**kwargs)
+        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+        head_dim = d_model // num_heads
+
+        self.mha = CausalSelfAttentionWithALiBi(num_heads=num_heads, head_dim=head_dim, use_alibi=True)
+        self.ffn = point_wise_feed_forward_network(d_model, dff)
+
+        self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+
+        self.dropout1 = tf.keras.layers.Dropout(rate)
+        self.dropout2 = tf.keras.layers.Dropout(rate)
+
+    def call(self, x, training=False, look_ahead_mask=None):
+        # Pre-norm (LayerNorm before attention)
+        x_norm = self.layernorm1(x)
+
+        # pass mask_future flag if look_ahead_mask is provided (we only support causal mask for now)
+        mask_future = True if look_ahead_mask is None else True
+        attn_output = self.mha(x_norm, mask_future=mask_future)  # (B, L, d_model)
+        attn_output = self.dropout1(attn_output, training=training)
+        out1 = x + attn_output
+
+        out1_norm = self.layernorm2(out1)
+        ffn_output = self.ffn(out1_norm)
+        ffn_output = self.dropout2(ffn_output, training=training)
+        out2 = out1 + ffn_output
+        return out2
+
+# ----------------------
+# Decoder-only Transformer model
+# ----------------------
+class DecoderOnlyTransformer(tf.keras.Model):
+    def __init__(self, num_layers, d_model, num_heads, dff, vocab_size, maximum_position_encoding, rate=0.05):
+        super().__init__()
+        assert d_model % num_heads == 0
+        self.d_model = d_model
+        self.num_layers = num_layers
+
+        self.embedding = tf.keras.layers.Embedding(vocab_size, d_model)
+        self.pos_encoding = positional_encoding(maximum_position_encoding, d_model)
+
+        self.dec_layers = [DecoderOnlyLayer(d_model, num_heads, dff, rate) for _ in range(num_layers)]
+        self.dropout = tf.keras.layers.Dropout(rate)
+        self.final_layer = tf.keras.layers.Dense(vocab_size)
+
+    def call(self, x, training=False, look_ahead_mask=None):
+        seq_len = tf.shape(x)[1]
+        x = self.embedding(x)  # (B, seq_len, d_model)
+        x *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
+        x = x + self.pos_encoding[:, :seq_len, :]
+
+        x = self.dropout(x, training=training)
+
+        for i in range(self.num_layers):
+            x = self.dec_layers[i](x, training=training, look_ahead_mask=look_ahead_mask)
+
+        logits = self.final_layer(x)  # (B, seq_len, vocab_size)
+        return logits
+
+
+#-----------------------------------------------------------------------------------
+
+
+
+import os
+import shutil
+# DATA_FILE='/kaggle/input/document-data/data.txt'
+# with open(DATA_FILE, "r", encoding="utf-8") as f:
+#     text = f.read().lower()
+
+# # Basic cleaning (customize as needed)
+# text = re.sub(r"[^a-zA-Z0-9\s\.\,\?\!\;:\-\'\"]+", " ", text)
+# text = re.sub(r"\s+", " ", text).strip()
+# # Tokenizer (word-level; you can use SentencePiece or subword tokenizers for production)
+# tokenizer = tf.keras.preprocessing.text.Tokenizer(filters='', oov_token='<OOV>')
+# tokenizer.fit_on_texts([text])
+# vocab_size = len(tokenizer.word_index) + 1
+
+# # Convert full text into a long sequence of token ids
+# token_ids = tokenizer.texts_to_sequences([text])[0]
+# token_ids = np.array(token_ids, dtype=np.int32)
+
+# # # Create sliding windows of length WINDOW = SEQ_LEN+1
+# windows = []
+# for start in range(0, len(token_ids) - WINDOW + 1, 1):  # step=1 for maximum data
+#     window = token_ids[start:start + WINDOW]
+#     windows.append(window)
+# windows = np.array(windows, dtype=np.int32)
+# print("Number of windows:", windows.shape[0])
+
+
+# # Split windows into inputs (first SEQ_LEN) and targets (last SEQ_LEN)
+# inputs = windows[:, :-1]   # shape (N, SEQ_LEN)
+# targets = windows[:, 1:]   # shape (N, SEQ_LEN)
+# dataset = tf.data.Dataset.from_tensor_slices((inputs, targets))
+# dataset = dataset.shuffle(BUFFER_SIZE).batch(BATCH_SIZE, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
+
+news = pd.read_csv("/kaggle/input/193k-medium-articles-dataset-for-llm-finetuning/193k.csv")
+news = news.head(5000)
+# print(news
+# print(news.columns)
+
+
+article = news['title']
+summary = news['text']
+article = article.apply(lambda x:str(x))
+summary = summary.apply(lambda x:str(x))
+
+
+def preprocess(text):
+    text = re.sub(r"&.[1-9]+;", " ", text)
+    return text
+
+
+article = article.apply(lambda x: preprocess(x))
+summary = summary.apply(lambda x: preprocess(x))
+
+filters = '!"#$%&()*+,-./:;=?@[\\]^_`{|}~\t\n'
+oov_token = '<unk>'
+article_tokenizer = tf.keras.preprocessing.text.Tokenizer(oov_token=oov_token)
+summary_tokenizer = tf.keras.preprocessing.text.Tokenizer(filters=filters, oov_token=oov_token)
+article_tokenizer.fit_on_texts(article)
+summary_tokenizer.fit_on_texts(summary)
+inputs = article_tokenizer.texts_to_sequences(article)
+targets = summary_tokenizer.texts_to_sequences(summary)
+
+ENCODER_VOCAB = len(article_tokenizer.word_index) + 1
+DECODER_VOCAB = len(summary_tokenizer.word_index) + 1
+# print(ENCODER_VOCAB, DECODER_VOCAB)
+
+inputs = tf.keras.preprocessing.sequence.pad_sequences(inputs, maxlen=SEQ_LEN, padding='post', truncating='post')
+targets = tf.keras.preprocessing.sequence.pad_sequences(targets, maxlen=SEQ_LEN, padding='post', truncating='post')
+# inputs = tf.cast(inputs, dtype=tf.int64)
+# targets = tf.cast(targets, dtype=tf.int64)
+
+dataset = tf.data.Dataset.from_tensor_slices((inputs, targets)).shuffle(BUFFER_SIZE).batch(BATCH_SIZE)
+
+
+# # -------------------------
+# # Build, compile, train
+# # -------------------------
+# model = DecoderOnlyTransformer(
+#     num_layers=NUM_LAYERS,
+#     d_model=EMBED_DIM,
+#     num_heads=NUM_HEADS,
+#     dff=DFF,
+#     vocab_size=vocab_size,
+#     maximum_position_encoding=SEQ_LEN,
+#     rate=DROPOUT
+# )
+
+model = DecoderOnlyTransformer(
+    num_layers=NUM_LAYERS,
+    d_model=EMBED_DIM,
+    num_heads=NUM_HEADS,
+    dff=DFF,
+    vocab_size=DECODER_VOCAB,   # NOT vocab_size
+    maximum_position_encoding=SEQ_LEN,
+    rate=DROPOUT
+)
+loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+
+optimizer = tf.keras.optimizers.Adam(learning_rate=LR)
+model.compile(optimizer=optimizer, loss=loss_fn, metrics=['sparse_categorical_accuracy'])
+model.fit(dataset, epochs=EPOCHS)
+print(model.summary())
+
+def generate_text_greedy(model, tokenizer, prompt, max_gen=40):
+    # tokenise prompt
+    token_list = tokenizer.texts_to_sequences([prompt])[0]
+    # if prompt longer than SEQ_LEN, keep last SEQ_LEN tokens
+    if len(token_list) > SEQ_LEN:
+        token_list = token_list[-SEQ_LEN:]
+    # pad on left to length SEQ_LEN
+    pad_len = SEQ_LEN - len(token_list)
+    input_seq = [0] * pad_len + token_list
+    input_seq = tf.expand_dims(input_seq, 0)  # (1, SEQ_LEN)
+
+    generated = []
+    for _ in range(max_gen):
+        logits = model(input_seq, training=False)  # (1, SEQ_LEN, vocab)
+        last_logits = logits[:, -1, :]            # (1, vocab)
+        next_id = tf.argmax(last_logits, axis=-1).numpy()[0]
+        generated.append(tokenizer.index_word.get(next_id, '<OOV>'))
+        # append and shift
+        input_seq = tf.concat([input_seq[:, 1:], tf.expand_dims([next_id], 0)], axis=-1)
+    return prompt + " " + " ".join(generated)
+
+# Example:
+print(generate_text_greedy(model, tokenizer, "The producers produce good", max_gen=50))
