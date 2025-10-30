@@ -1,0 +1,207 @@
+
+
+
+
+# from langchain_ollama import ChatOllama
+# from langchain_core.tools import tool
+# from langchain_core.messages import HumanMessage, AIMessage
+# from langgraph.prebuilt import ToolNode, tools_condition
+# from langgraph.graph import StateGraph, START, END
+# from pydantic import BaseModel, Field
+# from typing import List
+# from langgraph.graph.message import add_messages
+# from typing import TypedDict,Annotated
+
+# # 1️⃣ Define a simple tool
+# @tool
+# def get_weather(city: str) -> str:
+#     """Get the weather in a given city."""
+#     fake_data = {"Delhi": "Hot, 33°C", "Mumbai": "Humid, 29°C"}
+#     return fake_data.get(city, "Weather data not found.")
+
+# # 2️⃣ Define the graph state using Pydantic
+# class State(TypedDict):
+    
+#     messages: Annotated[list, add_messages]
+
+# # 3️⃣ Initialize LLM and bind the tool
+# llm = ChatOllama(model="llama3.2")
+
+# llm_with_tools = llm.bind_tools([get_weather])
+
+# # 4️⃣ Define a function that runs the LLM
+# def llm_step(state: State) -> State:
+#     response = llm_with_tools.invoke(state["messages"])
+#     state["messages"].append(response)
+#     return state
+
+# # 5️⃣ Create ToolNode
+# tool_node = ToolNode([get_weather])
+
+# # 6️⃣ Build the graph
+# graph_builder = StateGraph(State)
+# graph_builder.add_node("llm", llm_step)
+# graph_builder.add_node("tools", tool_node)
+# graph_builder.add_conditional_edges( "llm", tools_condition, "tools")
+# graph_builder.add_edge("tools", "llm")
+# graph_builder.add_edge(START, "llm")
+
+
+# # 7️⃣ Compile the graph
+# app = graph_builder.compile()
+
+# # 8️⃣ Initialize and run
+# import asyncio
+# async def main():
+#     user_input = "What's the weather in Delhi?"
+#     config = {"recursion_limit": 20}  # optional, can omit
+
+#     # 👇 The async equivalent of invoke()
+#     result = await app.ainvoke(
+#         {"messages": [HumanMessage(content=user_input)]}    )
+
+#     print("\n--- FINAL OUTPUT ---")
+#     print(result["messages"][-1].content)
+
+# # 9️⃣ Run it
+# if __name__ == "__main__":
+#     asyncio.run(main())
+
+# 9️⃣ Print results
+
+
+#-------------------------------------------------------------------------------------
+
+
+
+from langchain_ollama import ChatOllama
+from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage, AIMessage
+from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.graph import StateGraph, START, END
+from pydantic import BaseModel, Field
+from typing import List
+from langgraph.graph.message import add_messages
+from typing import TypedDict,Annotated
+from langchain_core.tools import BaseTool
+
+# 1️⃣ Define a simple tool
+@tool
+def get_weather(city: str) -> str:
+    """Get the weather in a given city."""
+    fake_data = {"Delhi": "Hot, 33°C", "Mumbai": "Humid, 29°C"}
+    return fake_data.get(city, "Weather data not found.")
+
+# 2️⃣ Define the graph state using Pydantic
+class State(TypedDict):
+    
+    messages: Annotated[list, add_messages]
+
+# 3️⃣ Initialize LLM and bind the tool
+llm = ChatOllama(model="llama3.2")
+
+llm_with_tools = llm.bind_tools([get_weather])
+
+# 4️⃣ Define a function that runs the LLM
+def llm_step(state: State) -> State:
+    response = llm_with_tools.invoke(state["messages"])
+    state["messages"].append(response)
+    return state
+
+
+class CityClimateTool(BaseTool):
+    name: str = "get_city_climate"
+    description: str = (
+        "Fetch climate and weather details for a given city, "
+        "including temperature, humidity, and season."
+    )
+
+    def _run(self, city: str) -> str:
+        """Synchronous version used by the LLM."""
+        data = {
+            "Delhi": {
+                "temperature": "33°C",
+                "humidity": "45%",
+                "season": "Autumn",
+                "climate": "Hot and dry",
+            },
+            "Mumbai": {
+                "temperature": "29°C",
+                "humidity": "80%",
+                "season": "Monsoon",
+                "climate": "Humid and coastal",
+            },
+            "Shimla": {
+                "temperature": "18°C",
+                "humidity": "50%",
+                "season": "Spring",
+                "climate": "Cool and pleasant",
+            },
+        }
+
+        info = data.get(city)
+        if not info:
+            return f"No climate data found for {city}."
+
+        return (
+            f"{city} Climate Report:\n"
+            f"- Temperature: {info['temperature']}\n"
+            f"- Humidity: {info['humidity']}\n"
+            f"- Season: {info['season']}\n"
+            f"- Climate: {info['climate']}"
+        )
+
+    async def _arun(self, city: str) -> str:
+        """Async version."""
+        return self._run(city)
+        
+llm = ChatOllama(model="llama3.2")
+
+climate_tool = CityClimateTool()
+system_prompt = (
+    "You are a concise assistant. "
+    "When you call tools, return the final answer directly. "
+    "Do not explain that you are using a tool. "
+    "Only output the final facts in plain text."
+)
+
+llm = ChatOllama(model="llama3.2", system=system_prompt).bind_tools([CityClimateTool()])
+
+# 4️⃣ Define a function that runs the LLM
+def llm_step(state: State) -> State:
+    response = llm_with_tools.invoke(state["messages"])
+    state["messages"].append(response)
+    return state
+
+# 5️⃣ Create ToolNode
+tool_node = ToolNode([get_weather])
+
+# 6️⃣ Build the graph
+graph_builder = StateGraph(State)
+graph_builder.add_node("llm", llm_step)
+graph_builder.add_node("tools", tool_node)
+graph_builder.add_conditional_edges( "llm", tools_condition, "tools")
+graph_builder.add_edge("tools", "llm")
+graph_builder.add_edge(START, "llm")
+
+
+# 7️⃣ Compile the graph
+app = graph_builder.compile()
+
+# 8️⃣ Initialize and run
+import asyncio
+async def main():
+    user_input = "What's the weather,humidity and climate in Delhi?"
+    config = {"recursion_limit": 20}  # optional, can omit
+
+    # 👇 The async equivalent of invoke()
+    result = await app.ainvoke(
+        {"messages": [HumanMessage(content=user_input)]}    )
+
+    print("\n--- FINAL OUTPUT ---")
+    print(result["messages"][-1].content)
+
+# 9️⃣ Run it
+if __name__ == "__main__":
+    asyncio.run(main())
+    
