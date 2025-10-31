@@ -215,12 +215,45 @@ if __name__ == "__main__":
 -----------------------
 
 
-parse _agent
+Defect_agent
 
-@lru_cache(maxsize=1)
+from langchain_ollama import ChatOllama
+from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage, AIMessage,SystemMessage,ToolCall
+from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.graph import StateGraph, START, END
+from pydantic import BaseModel, Field
+from typing import List
+from langgraph.graph.message import add_messages
+from typing import TypedDict,Annotated
+import json
+from langchain.tools import tool
+
+@tool
+def analyze_client_side_defect(log_summary: str) -> str:
+    """
+    Specialized ONTAP log analysis tool for **client-side defects** only.
+    Client-side defects typically originate from issues on the client system
+    that interacts with ONTAP, such as invalid requests, timeouts, network
+    disconnects, or misconfigured client parameters. These problems usually
+    occur before the request reaches the ONTAP cluster for processing.
+    Use this tool only when the log or defect description suggests that the
+    failure originated from the client side rather than from ONTAP itself.
+    The tool internally classifies the defect type before proceeding.
+    """
+    print("------------analyze_client_side_defect invoked--------------------------")
+    explanation_prompt = f"""
+        The following ONTAP log represents a client-side defect.
+        Only summarize the root cause of the defect in detail focusing on {log_summary}
+        """
+    return (
+            f"Defect Type: Client-side\n"
+            f"Analysis: {explanation_prompt}"
+        )
+        
 def get_prompt_message():
     """
-    Returns a static system message dict for ONTAP log parsing.
+    Returns a single summarized paragraph for ONTAP log parsing.
     """
     return {
         "role": "system",
@@ -240,25 +273,145 @@ def get_prompt_message():
         "If any field is missing, omit it gracefully. "
         "Summarize the extracted information in a single, clear paragraph written in natural language, "
         "stating what happened, in which module, and the probable defect type if inferable "
-        "(e.g., timeout, system failure, or test harness issue)."
+        
         )
     }
-
-
-
 
 
 def ontap_log_parse(log:str) -> str:
     print("started")
     prompt = get_prompt_message()
     last_msg =log
-    user_message = get_message_content(last_msg)
-
+    user_message =log
     # Invoke LLM properly
-    response = summary_llm.invoke([
+    response = llm.invoke([
         SystemMessage(content=prompt["content"]),
         HumanMessage(content=user_message)
     ])
-
     return response.content
+    
+
+@tool
+def analyze_cluster_config_defect(log_summary: str) -> str:
+    """
+    Cluster configuration defects typically involve issues with inter-node
+communication, cluster setup, quorum formation, or synchronization between
+clustered nodes. These can result from misconfigured network interfaces,
+authentication mismatches, or cluster metadata inconsistencies.
+Use this tool only when the log or defect description suggests such
+cluster-related setup or connectivity problems.
+The tool internally classifies the defect type before proceeding.
+    """
+    classification_prompt = f"""
+    You are an ONTAP defect classification assistant.
+    Determine whether the issue in the following log is:
+    - "cluster configuration"
+    - "server-side"
+    - "unclear"
+
+    Log Summary:
+    {log_summary}
+
+    Respond with only one label.
+    """
+
+    print("------------analyze_cluster_config_defect invoked--------------------------")
+    defect_type = defect_analyser_llm.invoke(classification_prompt).content.strip().lower()
+
+    # Execute only if classification == cluster configuration
+    if "cluster" in defect_type:
+        explanation_prompt = f"""
+        The following ONTAP log represents a cluster configuration defect.
+        Summarize in 2–3 lines what the likely root cause is,
+        focusing on node communication, interconnects, or cluster setup.
+
+        Log Summary:
+        {log_summary}
+        """
+        explanation = llm.invoke(explanation_prompt).content.strip()
+        return (
+            f"Defect Type: Cluster Configuration\n"
+            f"Analysis: {explanation}"
+        )
+
+    return (
+        f"Defect Type: {defect_type.capitalize()}\n"
+        f"Analysis: Not a cluster configuration issue. "
+        f"Suggest using another tool specialized for {defect_type} defects."
+    )
+
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+llm = ChatOllama(model="llama3.2")
+llm_with_tools = llm.bind_tools([analyze_client_side_defect,analyze_cluster_config_defect])
+tool_node = ToolNode([analyze_client_side_defect,analyze_cluster_config_defect])
+def llm_step(state: State) -> State:
+    response = llm_with_tools.invoke(state["messages"])
+    state["messages"].append(response)
+    return 
+
+system_prompt = """
+You are an ONTAP defect analysis assistant operating in a restricted tool environment.
+
+Rules:
+1. Use only the provided tools to handle user input.
+2. Do not reason, summarize, or answer directly.
+3. If a tool is applicable, invoke it.
+4. If no tool applies, output exactly:
+   "defect cannot be categorized by using the provided tools"
+5. Never create or assume information outside the available tools.
+"""
+
+# 6️⃣ Build the graph
+graph_builder = StateGraph(State)
+graph_builder.add_node("llm", llm_step)
+graph_builder.add_node("tools", tool_node)
+graph_builder.add_conditional_edges( "llm", tools_condition, "tools")
+graph_builder.add_edge("tools", "llm")
+graph_builder.add_edge(START, "llm")
+
+
+# 7️⃣ Compile the graph
+app = graph_builder.compile()
+
+# 8️⃣ Initialize and run
+import asyncio
+async def main():
+    user_input = """[2025-10-31 11:32:42] [ERROR] [ONTAP::Client::IO] Read operation failed:
+Timeout while waiting for server response.
+Request: GET_VOL_INFO volume1
+Client IP: 10.42.18.75
+Server IP: 10.42.18.10
+Error: Connection timed out after 30000 ms
+at /usr/lib/perl5/ONTAP/Client/IO.pm line 241.
+
+[2025-10-31 11:32:42] [WARN] [ONTAP::Client::Retry] Retrying request due to network timeout (attempt 2/3)
+at /usr/lib/perl5/ONTAP/Client/Retry.pm line 112.
+
+[2025-10-31 11:32:45] [ERROR] [ONTAP::Client::Session] Client failed to establish a stable session.
+Possible causes: client NIC misconfiguration or packet loss on client network path.
+Exiting with status code 408."""
+
+    config = {"recursion_limit": 20}  # optional, can omit
+    ontpparsed = ontap_log_parse(user_input)
+    print(ontpparsed)
+    # 👇 The async equivalent of invoke()
+    result = await app.ainvoke(
+        {"messages": [HumanMessage(content=user_input)]}    )
+    result = await app.ainvoke({
+    "messages": [
+        SystemMessage(content="You are an ONTAP defect classifier. Use the correct tool for each log."),
+        HumanMessage(content=ontpparsed)        # The user’s ONTAP log input
+    ]
+})
+
+    print("\n--- FINAL OUTPUT ---")
+    # print(result["messages"])
+    print(result["messages"][-1].content)
+
+
+# 9️⃣ Run it
+if __name__ == "__main__":
+    asyncio.run(main())
+
     
