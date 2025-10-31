@@ -204,4 +204,61 @@ async def main():
 # 9️⃣ Run it
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+
+
+
+
+
+
+-----------------------
+
+
+parse _agent
+
+@lru_cache(maxsize=1)
+def get_prompt_message():
+    """
+    Returns a static system message dict for ONTAP log parsing.
+    """
+    return {
+        "role": "system",
+        "content": (
+           "You are an expert in analyzing NetApp ONTAP NATE test framework and Perl stack logs. "
+        "Your task is to extract and summarize key diagnostic information from NATE or Perl stack traces. "
+        "Focus on capturing the following fields when present: "
+        "• error_message (text following FAIL, ERROR, or WARNING) "
+        "• error_code or return_code (numeric or symbolic if available) "
+        "• root_cause (concise description inferred from the message or function) "
+        "• status (e.g., FAILED, ABORTED, TIMEOUT, WARNING) "
+        "• event_or_module (such as EventMan::EventModules::ControllerEvents::CMode::SFOEvents) "
+        "• timeout_value (if mentioned in seconds) "
+        "• command_or_function (e.g., detect_sfo_giveback, sfo_giveback_generic) "
+        "• subtest_or_runid (values after -runid, Subtest::new, or Tharn::subtest) "
+        "• file_path_and_line (the Perl module path and line number) "
+        "If any field is missing, omit it gracefully. "
+        "Summarize the extracted information in a single, clear paragraph written in natural language, "
+        "stating what happened, in which module, and the probable defect type if inferable "
+        "(e.g., timeout, system failure, or test harness issue)."
+        )
+    }
+
+
+
+
+
+def ontap_log_parse(log:str) -> str:
+    print("started")
+    prompt = get_prompt_message()
+    last_msg =log
+    user_message = get_message_content(last_msg)
+
+    # Invoke LLM properly
+    response = summary_llm.invoke([
+        SystemMessage(content=prompt["content"]),
+        HumanMessage(content=user_message)
+    ])
+
+    return response.content
     
