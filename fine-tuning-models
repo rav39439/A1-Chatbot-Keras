@@ -1,0 +1,792 @@
+# # This Python 3 environment comes with many helpful analytics libraries installed
+# # It is defined by the kaggle/python Docker image: https://github.com/kaggle/docker-python
+# # For example, here's several helpful packages to load
+
+
+
+# import numpy as np # linear algebra
+# import pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)
+
+# # Input data files are available in the read-only "../input/" directory
+# For example, running this (by clicking run or pressing Shift+Enter) will list all files under the input directory
+
+# for dirname, _, filenames in os.walk('/kaggle/input'):
+#     for filename in filenames:
+#         print(os.path.join(dirname, filename))
+
+#------------------------for csv files--------------------------------
+
+# import os
+# import json
+# import shutil
+# import torch
+# import pandas as pd
+# from torch.utils.data import Dataset, DataLoader
+# from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+# from torch.optim import AdamW
+# from peft import get_peft_model, LoraConfig, TaskType
+
+# # ================================
+# # STEP 1: Load CSV and convert to dict
+# # ================================
+# csv_path = "/kaggle/input/summerization/summarization_50000.csv"  # <-- your CSV file
+# df = pd.read_csv(csv_path)
+
+# # Ensure CSV has 'input' and 'output' columns
+# raw_data = df.to_dict(orient="records")
+
+# # ================================
+# # STEP 2: Tokenization
+# # ================================
+# tokenizer = AutoTokenizer.from_pretrained("facebook/bart-base")
+# MAX_LENGTH = 512
+
+# def tokenize_example(example):
+#     inputs = tokenizer(
+#         example["Content"],
+#         max_length=MAX_LENGTH,
+#         truncation=True,
+#         padding="max_length",
+#     )
+#     targets = tokenizer(
+#         example["Headline"],
+#         max_length=MAX_LENGTH,
+#         truncation=True,
+#         padding="max_length"
+#     )
+#     inputs["labels"] = targets["input_ids"]
+#     return inputs
+
+# tokenized_data = [tokenize_example(example) for example in raw_data]
+
+# # ================================
+# # STEP 3: Dataset + DataLoader
+# # ================================
+# class ProfitLossDataset(Dataset):
+#     def __init__(self, tokenized_data):
+#         self.data = tokenized_data
+
+#     def __len__(self):
+#         return len(self.data)
+
+#     def __getitem__(self, idx):
+#         item = {key: torch.tensor(val) for key, val in self.data[idx].items()}
+#         return item
+
+# train_dataset = ProfitLossDataset(tokenized_data)
+# train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+
+# # ================================
+# # STEP 4: Load Model + LoRA
+# # ================================
+# model = AutoModelForSeq2SeqLM.from_pretrained("facebook/bart-base")
+# print("runningnnn11111111111111")
+
+# peft_config = LoraConfig(
+#     r=8,
+#     lora_alpha=32,
+#     target_modules=["q_proj", "v_proj", "k_proj", "out_proj"],
+#     lora_dropout=0.05,
+#     task_type=TaskType.SEQ_2_SEQ_LM,
+# )
+# print("runningnnn")
+
+# model = get_peft_model(model, peft_config)
+# print("runningnnn33333333333")
+
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# model.to(device)
+
+# print("runningnnn22222222222222")
+
+# optimizer = AdamW(model.parameters(), lr=3e-4)
+
+# print("runningnnn44444444444444")
+
+# # ================================
+# # STEP 5: Training Loop
+# # ================================
+# model.train()
+# print("runningnnn5555555555555555")
+
+# # for epoch in range(1):  # change epochs if needed
+# #     for batch in train_loader:
+# #         batch = {k: v.to(device) for k, v in batch.items()}
+# #         outputs = model(**batch)
+# #         loss = outputs.loss
+# #         loss.backward()
+# #         optimizer.step()
+# #         optimizer.zero_grad()
+# #         print(f"Number of batches in one epoch")
+# #     print(f"Epoch {epoch + 1} completed.")
+# for epoch in range(1):  # change epochs if needed
+#     total_batches = len(train_loader)
+#     print(f"\nEpoch {epoch+1} started... (Total Batches: {total_batches})")
+
+#     for batch_idx, batch in enumerate(train_loader, start=1):
+#         batch = {k: v.to(device) for k, v in batch.items()}
+#         outputs = model(**batch)
+#         loss = outputs.loss
+#         loss.backward()
+#         optimizer.step()
+#         optimizer.zero_grad()
+
+#         # Print current batch and total batches
+#         print(f"Epoch [{epoch+1}] | Batch [{batch_idx}/{total_batches}] | Loss: {loss.item():.4f}")
+
+# # ================================
+# # STEP 6: Save Model
+# # ================================
+# output_dir = "./lora_finetuned_bart"
+# os.makedirs(output_dir, exist_ok=True)
+
+# model.print_trainable_parameters()
+# model.save_pretrained(output_dir)
+# tokenizer.save_pretrained(output_dir)
+
+# # ================================
+# # STEP 7: Inference Test
+# # ================================
+# model.eval()
+# test_question = "The watches have become costlier due to rise in tariff. These watches were orginally imported from India. Since tariff rise price has risen and become very high"
+# inputs = tokenizer(test_question, return_tensors="pt", max_length=MAX_LENGTH, truncation=True).to(device)
+# generated_ids = model.generate(**inputs, max_new_tokens=100)
+# print("Model Answer:", tokenizer.decode(generated_ids[0], skip_special_tokens=True))
+
+# # Save as zip for Kaggle output
+# shutil.make_archive("/kaggle/working/lora_finetuned_bart", 'zip', output_dir)
+
+
+
+#-----------------------------------------------------------------------
+
+
+# import os
+# import json
+# import torch
+# import shutil
+
+# excel_path = "/kaggle/input/simple-interest/simple_interest_dataset.xlsx"
+
+# # Read Excel
+# df = pd.read_excel(excel_path)
+
+# # Ensure columns exist
+# assert "input" in df.columns and "output" in df.columns, "Excel must have input and output columns"
+
+# # Convert to list of dicts
+# data = df[["input", "output"]].to_dict(orient="records")
+
+# # Save as JSON for later use
+# json_path = "/kaggle/working/simple_interest_dataset.json"
+# with open(json_path, "w") as f:
+#     json.dump(data, f, indent=2)
+
+# print(f"Converted Excel to JSON: {json_path}, total {len(data)} records")
+
+# from torch.utils.data import Dataset, DataLoader
+# from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+# from torch.optim import AdamW
+
+# from peft import get_peft_model, LoraConfig, TaskType
+
+# # Load the raw dataset from JSON
+
+
+# with open("/kaggle/input/simple-interest/simple_interest_dataset_rephrased_varied.json", "r") as f:
+#     raw_data = json.load(f)
+
+# # Load BART tokenizer
+# tokenizer = AutoTokenizer.from_pretrained("facebook/bart-base")
+# MAX_LENGTH = 512
+
+# # Tokenization function for Seq2Seq models like BART
+# def tokenize_example(example):
+#     inputs = tokenizer(
+#         example["input"],
+#         max_length=MAX_LENGTH,
+#         truncation=True,
+#         padding="max_length",
+#     )
+#     targets = tokenizer(
+#         example["output"],
+#         max_length=MAX_LENGTH,
+#         truncation=True,
+#         padding="max_length"
+#     )
+
+#     inputs["labels"] = targets["input_ids"]
+#     return inputs
+
+# # Tokenize all examples
+# tokenized_data = [tokenize_example(example) for example in raw_data]
+
+# # PyTorch Dataset wrapper
+# class ProfitLossDataset(Dataset):
+#     def __init__(self, tokenized_data):
+#         self.data = tokenized_data
+
+#     def __len__(self):
+#         return len(self.data)
+
+#     def __getitem__(self, idx):
+#         item = {key: torch.tensor(val) for key, val in self.data[idx].items()}
+#         return item
+
+# # Prepare DataLoader
+# train_dataset = ProfitLossDataset(tokenized_data)
+# train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+
+# # Load BART model for Seq2Seq
+# model = AutoModelForSeq2SeqLM.from_pretrained("facebook/bart-base")
+
+# # Setup LoRA for Seq2Seq task
+# peft_config = LoraConfig(
+#     r=8,
+#     lora_alpha=32,
+#     target_modules=["q_proj", "v_proj", "k_proj", "out_proj"],  # More general for BART
+#     lora_dropout=0.05,
+#     task_type=TaskType.SEQ_2_SEQ_LM,
+# )
+
+# model = get_peft_model(model, peft_config)
+
+# # Move model to available device
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# model.to(device)
+
+# # Optimizer
+# optimizer = AdamW(model.parameters(), lr=3e-4)
+
+# # Training loop
+# model.train()
+# for epoch in range(10):  # Train for 3 epochs
+#     for batch in train_loader:
+#         batch = {k: v.to(device) for k, v in batch.items()}
+#         outputs = model(**batch)
+#         loss = outputs.loss
+#         loss.backward()
+#         optimizer.step()
+#         optimizer.zero_grad()
+#         num_batches = len(train_loader)
+#         print(f"Number of batches in one epoch: {num_batches}")
+#     print(f"Epoch {epoch + 1} completed.")
+
+# # Inference
+
+# output_dir = "./lora_finetuned_bart"
+
+# # Make sure the directory exists
+# import os
+# os.makedirs(output_dir, exist_ok=True)
+# model.print_trainable_parameters()
+# # Save the LoRA model (the full model with LoRA adapters)
+# model.save_pretrained("./lora_finetuned_bart")
+
+# tokenizer.save_pretrained("./lora_finetuned_bart")
+# merged_model = model.merge_and_unload()
+# # merged_model.save_pretrained("merged_bart_model")
+# # tokenizer.save_pretrained("merged_bart_model")
+# model.eval()
+# test_question = "A man buys a phone for $800 and sells it for $1000. What is the profit percentage?"
+# inputs = tokenizer(test_question, return_tensors="pt", max_length=MAX_LENGTH, truncation=True).to(device)
+# generated_ids = model.generate(**inputs, max_new_tokens=100)
+# print(tokenizer.decode(generated_ids[0], skip_special_tokens=True))
+# shutil.make_archive("/kaggle/working/lora_finetuned_bart", 'zip', output_dir)
+
+
+#---------------------------training the pretrained //////////
+
+
+import os
+import shutil
+
+src = "/kaggle/input/summerization-model3"        # your uploaded dataset folder
+dst = "/kaggle/working/summerization-model3"      # writable output folder
+
+# Copy entire folder
+shutil.copytree(src, dst, dirs_exist_ok=True)
+
+import torch
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+from peft import PeftModel
+
+# Path to your copied folder
+model_dir = "/kaggle/working/summerization-model3"
+
+# Load base model (must be same one you trained with)
+base_model = "facebook/bart-base"  # or "facebook/bart-large"
+print("Base model:", base_model)
+
+# Load tokenizer + base model
+tokenizer = AutoTokenizer.from_pretrained(base_model)
+model = AutoModelForSeq2SeqLM.from_pretrained(base_model)
+
+# Load LoRA/adapter weights
+model = PeftModel.from_pretrained(model, model_dir)
+model.eval()
+
+# # Define constants
+MAX_LENGTH = 512
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
+
+# Run inference
+test_question = "Always remember how to solve tough problems. This will help you to get jobs"
+inputs = tokenizer(test_question, return_tensors="pt", max_length=MAX_LENGTH, truncation=True).to(device)
+
+generated_ids = model.generate(**inputs, max_new_tokens=100)
+print("Generated answer:", tokenizer.decode(generated_ids[0], skip_special_tokens=True))
+
+
+
+
+#------------------------------------------
+
+# import json
+# import os
+# import torch
+# from torch.utils.data import Dataset, DataLoader
+# from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForCausalLM
+# from torch.optim import AdamW
+# from peft import get_peft_model, PeftConfig, PeftModel, LoraConfig, TaskType
+
+# # Config
+# model_id = "facebook/bart-base"
+# lora_dir = "./merged_bart_model"
+# MAX_LENGTH = 512
+# BATCH_SIZE = 16
+# NUM_EPOCHS = 2
+# LEARNING_RATE = 1e-5
+
+# # Load raw dataset from JSON
+# with open("/kaggle/input/profit-loss-update5/profit_loss_10000.json", "r") as f:
+#     raw_data = json.load(f)
+
+# # Load tokenizer (base tokenizer)
+# tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+# Tokenization function for seq2seq
+# def tokenize_example(example):
+#     inputs = tokenizer(
+#         example["input"],
+#         max_length=MAX_LENGTH,
+#         truncation=True,
+#         padding="max_length",
+#     )
+#     targets = tokenizer(
+#         example["output"],
+#         max_length=MAX_LENGTH,
+#         truncation=True,
+#         padding="max_length"
+#     )
+#     inputs["labels"] = targets["input_ids"]
+#     return inputs
+# #
+# # Tokenize dataset
+# tokenized_data = [tokenize_example(ex) for ex in raw_data]
+
+# # Dataset class
+# class ProfitLossDataset(Dataset):
+#     def __init__(self, tokenized_data):
+#         self.data = tokenized_data
+# #
+#     def __len__(self):
+#         return len(self.data)
+
+#     def __getitem__(self, idx):
+#         item = {k: torch.tensor(v) for k, v in self.data[idx].items()}
+#         return item
+
+# train_dataset = ProfitLossDataset(tokenized_data)
+# train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+# print(LEARNING_RATE)
+
+# # model = AutoModelForSeq2SeqLM.from_pretrained(model_path)
+# # tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+# config = PeftConfig.from_pretrained("/kaggle/working/pretrained-mode4")
+# model = AutoModelForSeq2SeqLM.from_pretrained("facebook/bart-base")
+# model = PeftModel.from_pretrained(model,
+# "/kaggle/working/pretrained-mode4",
+#  is_trainable=True # 👈 here
+# )
+# # check if it's working
+# model.print_trainable_parameters()
+
+#
+# # Move model to device
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# model.to(device)
+
+# # Optimizer
+# optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
+
+# # Training loop
+# model.train()
+# for epoch in range(NUM_EPOCHS):
+#     for batch_idx, batch in enumerate(train_loader):
+#         batch = {k: v.to(device) for k, v in batch.items()}
+#         outputs = model(**batch)
+#         loss = outputs.loss
+
+#         loss.backward()
+#         optimizer.step()
+#         optimizer.zero_grad()
+#         print("Batch proccessed")
+
+#         if batch_idx % 10 == 0:
+#             print(f"Epoch {epoch+1}, Batch {batch_idx}, Loss: {loss.item():.4f}")
+
+#     print(f"Epoch {epoch+1} completed.")
+
+# Save updated LoRA model and tokenizer
+# save_dir = lora_dir + "_updated5"
+
+# os.makedirs(lora_dir + "_updated5", exist_ok=True)
+# model.save_pretrained(lora_dir + "_updated5")
+# tokenizer.save_pretrained(lora_dir + "_updated5")
+
+# # Inference test
+# model.eval()
+# # generated_ids = model.generate(**inputs, max_new_tokens=100)
+# # print(tokenizer.decode(generated_ids[0], skip_special_tokens=True))
+# test_question = "A man buys a phone for $800 and sells it for $1000. What is the profit percentage?"
+# inputs = tokenizer(test_question, return_tensors="pt", max_length=MAX_LENGTH, truncation=True).to(device)
+# generated_ids = model.generate(**inputs, max_new_tokens=100)
+# shutil.make_archive("/kaggle/working/lora_finetuned_bart_", 'zip', save_dir)
+
+# print("Generated answer:", tokenizer.decode(generated_ids[0], skip_special_tokens=True))
+
+#---------------------------------------------------------------------------------
+
+# import json
+# import os
+# import torch
+# from torch.utils.data import Dataset, DataLoader
+# from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+# from peft import PeftConfig, PeftModel
+# from torch.optim import AdamW
+
+# # ----------------------------
+# # Config
+# # ----------------------------
+# model_id = "facebook/bart-base"
+# lora_dir = "./merged_bart_model"
+# MAX_LENGTH = 512
+# BATCH_SIZE = 16
+# NUM_EPOCHS = 5
+# LEARNING_RATE = 1e-5
+# d_model = 768
+
+# # ----------------------------
+# # Load dataset
+# # ----------------------------
+# with open("/kaggle/input/simple-interest9/simple_interest_dataset_8000.json", "r") as f:
+#     raw_data = json.load(f)
+
+# # ----------------------------
+# # Tokenizer
+# # ----------------------------
+# tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+# # ----------------------------
+# # Tokenization function (no padding masking)
+
+# def tokenize_example(example):
+#     inputs = tokenizer(
+#         example["input"],
+#         max_length=MAX_LENGTH,
+#         truncation=True,
+#         padding="max_length",
+#     )
+#     targets = tokenizer(
+#         example["output"],
+#         max_length=MAX_LENGTH,
+#         truncation=True,
+#         padding="max_length",
+#     )
+
+#     # Replace padding tokens with -100 in labels
+#     labels = [
+#         l if l != tokenizer.pad_token_id else -100
+#         for l in targets["input_ids"]
+#     ]
+#     inputs["labels"] = labels
+
+#     return inputs
+# # ----------------------------
+
+
+# tokenized_data = [tokenize_example(ex) for ex in raw_data]
+
+# # ----------------------------
+# # Dataset
+# # ----------------------------
+# class ProfitLossDataset(Dataset):
+#     def __init__(self, tokenized_data):
+#         self.data = tokenized_data
+
+#     def __len__(self):
+#         return len(self.data)
+
+#     def __getitem__(self, idx):
+#         item = {k: torch.tensor(v) for k, v in self.data[idx].items()}
+#         return item
+
+# train_dataset = ProfitLossDataset(tokenized_data)
+# train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+
+# # ----------------------------
+# # Model + LoRA/PEFT
+# # ----------------------------
+# config = PeftConfig.from_pretrained("/kaggle/working/simple-interest-model12")
+# model = AutoModelForSeq2SeqLM.from_pretrained("facebook/bart-base")
+# model = PeftModel.from_pretrained(
+#     model,
+#     "/kaggle/working/simple-interest-model12",
+#     is_trainable=True
+# )
+# model.print_trainable_parameters()
+
+# # ----------------------------
+# # Device
+# # ----------------------------
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# model.to(device)
+
+# # ----------------------------
+# # Custom Adam Warmup optimizer
+# # ----------------------------
+# class AdamWarmup:
+#     def __init__(self, model_size, warmup_steps, optimizer):
+#         self.model_size = model_size
+#         self.warmup_steps = warmup_steps
+#         self.optimizer = optimizer
+#         self.current_step = 0
+#         self.lr = 0
+
+#     def get_lr(self):
+#         return self.model_size ** (-0.5) * min(self.current_step ** (-0.5),
+#                                                self.current_step * self.warmup_steps ** (-1.5))
+#     def step(self):
+#         self.current_step += 1
+#         lr = self.get_lr()
+#         for param_group in self.optimizer.param_groups:
+#             param_group['lr'] = lr
+#         self.lr = lr
+#         self.optimizer.step()
+
+# adam_optimizer = torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9)
+# optimizer = AdamWarmup(model_size=d_model, warmup_steps=4000, optimizer=adam_optimizer)
+
+# # ----------------------------
+# # Training loop (no gradient accumulation, no padding masking)
+# # ----------------------------
+# model.train()
+# for epoch in range(NUM_EPOCHS):
+#     for batch_idx, batch in enumerate(train_loader):
+#         batch = {k: v.to(device) for k, v in batch.items()}
+#         outputs = model(**batch)
+#         loss = outputs.loss
+
+#         loss.backward()
+#         optimizer.step()
+#         optimizer.optimizer.zero_grad()  # zero gradients of inner optimizer
+#         print("Batch processed")
+
+#         if batch_idx % 10 == 0:
+#             print(f"Epoch {epoch+1}, Batch {batch_idx}, Loss: {loss.item():.4f}")
+
+#     print(f"Epoch {epoch+1} completed.")
+
+# # ----------------------------
+# # Save LoRA model + tokenizer
+# # ----------------------------
+# save_dir = lora_dir + "_updated5"
+# os.makedirs(lora_dir + "_updated5", exist_ok=True)
+# model.save_pretrained(lora_dir + "_updated5")
+# tokenizer.save_pretrained(lora_dir + "_updated5")
+
+# # ----------------------------
+# # Inference test
+# # ----------------------------
+# model.eval()
+# test_question = "what is the simple interest on principal sum 7858 charged anually at the rate 10% for 5 years 6 months"
+# inputs = tokenizer(test_question, return_tensors="pt", max_length=MAX_LENGTH, truncation=True).to(device)
+# generated_ids = model.generate(**inputs, max_new_tokens=100)
+# # print("Generated answer:", tokenizer.decode(generated_ids[0], skip_special_tokens=True))
+# shutil.make_archive("/kaggle/working/lora_finetuned_bart_", 'zip', save_dir)
+
+
+#----------------------excel -------------------------
+
+
+# import os
+# import torch
+# import pandas as pd
+# from torch.utils.data import Dataset, DataLoader
+# from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+# from peft import PeftConfig, PeftModel
+
+# # ----------------------------
+# # Config
+# # ----------------------------
+# model_id = "facebook/bart-base"
+# lora_dir = "./merged_bart_model"
+# MAX_LENGTH = 512
+# BATCH_SIZE = 16
+# NUM_EPOCHS = 1
+# d_model = 768
+
+# # ----------------------------
+# # Load dataset from CSV or Excel
+# # ----------------------------
+# # CSV
+# df = pd.read_csv("/kaggle/input/summerization/summarization_50000.csv")
+
+# # Excel
+# # df = pd.read_excel("/kaggle/input/simple-interest9/simple_interest_dataset.xlsx")
+
+# # Ensure columns exist
+# assert "Headline" in df.columns and "Content" in df.columns, "CSV/Excel must have 'input' and 'output' columns"
+
+# raw_data = df.to_dict(orient="records")
+
+# # ----------------------------
+# # Tokenizer
+# # ----------------------------
+# tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+# def tokenize_example(example):
+#     inputs = tokenizer(
+#         example["Content"],
+#         max_length=MAX_LENGTH,
+#         truncation=True,
+#         padding="max_length",
+#     )
+#     targets = tokenizer(
+#         example["Headline"],
+#         max_length=MAX_LENGTH,
+#         truncation=True,
+#         padding="max_length",
+#     )
+#     labels = [
+#         l if l != tokenizer.pad_token_id else -100
+#         for l in targets["input_ids"]
+#     ]
+#     inputs["labels"] = labels
+#     return inputs
+
+# tokenized_data = [tokenize_example(ex) for ex in raw_data]
+
+# # ----------------------------
+# # Dataset
+# # ----------------------------
+# class ProfitLossDataset(Dataset):
+#     def __init__(self, tokenized_data):
+#         self.data = tokenized_data
+
+#     def __len__(self):
+#         return len(self.data)
+
+#     def __getitem__(self, idx):
+#         item = {k: torch.tensor(v) for k, v in self.data[idx].items()}
+#         return item
+
+# train_dataset = ProfitLossDataset(tokenized_data)
+# train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+
+# # ----------------------------
+# # Model + LoRA/PEFT
+# # ----------------------------
+# config = PeftConfig.from_pretrained("/kaggle/working/summerization-model")
+# model = AutoModelForSeq2SeqLM.from_pretrained("facebook/bart-base")
+# model = PeftModel.from_pretrained(
+#     model,
+#     "/kaggle/working/summerization-model",
+#     is_trainable=True
+# )
+# model.print_trainable_parameters()
+
+# # ----------------------------
+# # Device
+# # ----------------------------
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# model.to(device)
+
+# # ----------------------------
+# # Custom Adam Warmup optimizer
+# # ----------------------------
+# class AdamWarmup:
+#     def __init__(self, model_size, warmup_steps, optimizer):
+#         self.model_size = model_size
+#         self.warmup_steps = warmup_steps
+#         self.optimizer = optimizer
+#         self.current_step = 0
+#         self.lr = 0
+
+#     def get_lr(self):
+#         return self.model_size ** (-0.5) * min(self.current_step ** (-0.5),
+#                                                self.current_step * self.warmup_steps ** (-1.5))
+#     def step(self):
+#         self.current_step += 1
+#         lr = self.get_lr()
+#         for param_group in self.optimizer.param_groups:
+#             param_group['lr'] = lr
+#         self.lr = lr
+#         self.optimizer.step()
+
+# adam_optimizer = torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9)
+# optimizer = AdamWarmup(model_size=d_model, warmup_steps=4000, optimizer=adam_optimizer)
+
+# # ----------------------------
+# # Training loop
+# # ----------------------------
+# model.train()
+# for epoch in range(NUM_EPOCHS):
+#     total_batches = len(train_loader)
+#     for batch_idx, batch in enumerate(train_loader):
+#         batch = {k: v.to(device) for k, v in batch.items()}
+#         outputs = model(**batch)
+#         loss = outputs.loss
+
+#         loss.backward()
+#         optimizer.step()
+#         optimizer.optimizer.zero_grad()
+#         print(f"Epoch {epoch+1}/{NUM_EPOCHS}, Batch {batch_idx+1}/{total_batches}, Loss: {loss.item():.4f}")
+
+#         if batch_idx % 10 == 0:
+            
+#             print(f"Epoch {epoch+1}/{NUM_EPOCHS} is completed")
+#             # break
+
+#     print(f"Epoch {epoch+1} completed.")
+
+# # ----------------------------
+# # Save model
+# # ----------------------------
+# save_dir = lora_dir + "_updated_csv"
+# os.makedirs(save_dir, exist_ok=True)
+# model.save_pretrained(save_dir)
+# tokenizer.save_pretrained(save_dir)
+
+# # ----------------------------
+# # Inference test + Save output to Excel
+# # ----------------------------
+# model.eval()
+# test_question = "People are always fighting for food. This is cruelity"
+# inputs = tokenizer(test_question, return_tensors="pt", max_length=MAX_LENGTH, truncation=True).to(device)
+# generated_ids = model.generate(**inputs, max_new_tokens=100)
+# generated_answer = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+# zip_path = "/kaggle/working/lora_finetuned_bart_model"
+# shutil.make_archive(zip_path, 'zip', save_dir)
+
+# print("Generated Answer:", generated_answer)
+
+# Save to Excel
+
+
+
+
+
