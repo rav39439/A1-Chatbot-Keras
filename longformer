@@ -119,7 +119,7 @@ def longformer_sliding_window_attention(Q, K, V, alibi_bias=None, mask_future=Tr
 
     return out
 
-
+#---------------------------Cpu-based window-attention--------------------
 # @tf.function
 # def longformer_sliding_window_attention(Q, K, V, alibi_bias=None, mask_future=True):
 #     """
