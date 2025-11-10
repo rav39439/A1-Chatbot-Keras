@@ -65,109 +65,166 @@ import math
 @tf.function
 def longformer_sliding_window_attention(Q, K, V, alibi_bias=None, mask_future=True):
     """
-    Implements Longformer's sliding window attention using a fixed-size local window.
-
-    This function iterates over the sequence length L using a TensorArray,
-    which is necessary for dynamic slicing/gathering within a TensorFlow graph.
-    It assumes symmetric windows, where the total window_size includes the query token itself.
-
-    Args:
-        Q (tf.Tensor): Query tensor (B, H, L, D).
-        K (tf.Tensor): Key tensor (B, H, L, D).
-        V (tf.Tensor): Value tensor (B, H, L, D).
-        window_size (int): The full size of the local attention window (e.g., 512).
-                           This must be an even number (or +1 for the query).
-        alibi_bias (tf.Tensor): Pre-calculated ALiBi bias tensor (H, L, L).
-                                This represents the relative position bias.
-
-    Returns:
-        tf.Tensor: Output tensor with applied windowed attention (B, H, L, D).
+    Vectorized Longformer-style local window attention.
+    SAME LOGIC as your loop version, but GPU-friendly and fully batched.
     """
-    window_size=64
+
+    window_size = 32
     B, H, L, D = tf.unstack(tf.shape(Q))
-    # D_k is the head dimension, used for scaling
-    D_k = tf.cast(D, Q.dtype)
-    scale = tf.math.rsqrt(D_k)
-    print(scale)
+    W = window_size // 2
 
-    # Calculate half-window size (context tokens on one side).
-    # We take half the window size and ensure it's at least 1 for proper indexing.
-    W = tf.cast(tf.maximum(1, window_size // 2), tf.int32)
+    # scaling
+    scale = tf.math.rsqrt(tf.cast(D, Q.dtype))
 
-    # TensorArray for collecting the output tokens (B, H, D) for each position
-    output_ta = tf.TensorArray(
-        dtype=Q.dtype,
-        size=L,
-        dynamic_size=False,
-        element_shape=[Q.shape[0], Q.shape[1], Q.shape[3]]
+    # -----------------------------
+    # 1. Build full (B,H,L,L) scores = Q @ K^T
+    # -----------------------------
+    # (B,H,L,D) @ (B,H,D,L) -> (B,H,L,L)
+    scores_full = tf.matmul(Q, K, transpose_b=True) * scale
 
-    )
+    # -----------------------------
+    # 2. Add ALiBi (H,L,L) -> (B,H,L,L)
+    # -----------------------------
+    if alibi_bias is not None:
+        scores_full += alibi_bias[None, :, :, :]
+
+    # -----------------------------
+    # 3. Build sliding-window mask (L,L)
+    # -----------------------------
+    position_ids = tf.range(L)
+    dist = tf.abs(position_ids[None, :] - position_ids[:, None])   # (L,L)
+    window_mask = tf.cast(dist > W, Q.dtype)                       # 1 = out of window
+
     NEG_INF = tf.constant(-1e9, dtype=Q.dtype)
-    lower = tf.linalg.band_part(tf.ones((L, L), dtype=Q.dtype), -1, 0)
-    causal_mask = 1.0 - lower   # future tokens = 1
+    scores_full += window_mask[None, None, :, :] * NEG_INF
+
+    # -----------------------------
+    # 4. Add causal mask (upper triangle)
+    # -----------------------------
+    if mask_future:
+        lower = tf.linalg.band_part(tf.ones((L, L), dtype=Q.dtype), -1, 0)
+        causal_mask = 1.0 - lower
+        scores_full += causal_mask[None, None, :, :] * NEG_INF
+
+    # -----------------------------
+    # 5. Softmax over last dimension (windowed because invalid entries = -inf)
+    # -----------------------------
+    attn_weights = tf.nn.softmax(scores_full, axis=-1)  # (B,H,L,L)
+
+    # -----------------------------
+    # 6. Weighted sum of values
+    # -----------------------------
+    out = tf.matmul(attn_weights, V)   # (B,H,L,D)
+
+    return out
+
+
+# @tf.function
+# def longformer_sliding_window_attention(Q, K, V, alibi_bias=None, mask_future=True):
+#     """
+#     Implements Longformer's sliding window attention using a fixed-size local window.
+
+#     This function iterates over the sequence length L using a TensorArray,
+#     which is necessary for dynamic slicing/gathering within a TensorFlow graph.
+#     It assumes symmetric windows, where the total window_size includes the query token itself.
+
+#     Args:
+#         Q (tf.Tensor): Query tensor (B, H, L, D).
+#         K (tf.Tensor): Key tensor (B, H, L, D).
+#         V (tf.Tensor): Value tensor (B, H, L, D).
+#         window_size (int): The full size of the local attention window (e.g., 512).
+#                            This must be an even number (or +1 for the query).
+#         alibi_bias (tf.Tensor): Pre-calculated ALiBi bias tensor (H, L, L).
+#                                 This represents the relative position bias.
+
+#     Returns:
+#         tf.Tensor: Output tensor with applied windowed attention (B, H, L, D).
+#     """
+#     window_size=32
+#     B, H, L, D = tf.unstack(tf.shape(Q))
+#     # D_k is the head dimension, used for scaling
+#     D_k = tf.cast(D, Q.dtype)
+#     scale = tf.math.rsqrt(D_k)
+#     print(scale)
+
+#     # Calculate half-window size (context tokens on one side).
+#     # We take half the window size and ensure it's at least 1 for proper indexing.
+#     W = tf.cast(tf.maximum(1, window_size // 2), tf.int32)
+
+#     # TensorArray for collecting the output tokens (B, H, D) for each position
+#     output_ta = tf.TensorArray(
+#         dtype=Q.dtype,
+#         size=L,
+#         dynamic_size=False,
+#         element_shape=[Q.shape[0], Q.shape[1], Q.shape[3]]
+
+#     )
+#     NEG_INF = tf.constant(-1e9, dtype=Q.dtype)
+#     lower = tf.linalg.band_part(tf.ones((L, L), dtype=Q.dtype), -1, 0)
+#     causal_mask = 1.0 - lower   # future tokens = 1
 
 
 
-    # --- Start Iterative Window Attention --
-    for i in tf.range(L):
-        # 1. Calculate window start and end indices
-        # start = max(0, i - W)
-        # end = min(L, i + W + 1) -> +1 because Python slicing is exclusive
-        start_index = tf.maximum(0, i - W)
-        end_index = tf.minimum(L, i + W + 1)
+#     # --- Start Iterative Window Attention --
+#     for i in tf.range(L):
+#         # 1. Calculate window start and end indices
+#         # start = max(0, i - W)
+#         # end = min(L, i + W + 1) -> +1 because Python slicing is exclusive
+#         start_index = tf.maximum(0, i - W)
+#         end_index = tf.minimum(L, i + W + 1)
 
-        # 2. Extract current query token Q_i (B, H, 1, D)
-        Q_i = Q[:, :, i:i+1, :]
+#         # 2. Extract current query token Q_i (B, H, 1, D)
+#         Q_i = Q[:, :, i:i+1, :]
 
-        # 3. Slice K, V, and ALiBi bias for the current window
-        # K_window, V_window shape: (B, H, WindowLength, D)
-        K_window = K[:, :, start_index:end_index, :]
-        V_window = V[:, :, start_index:end_index, :]
+#         # 3. Slice K, V, and ALiBi bias for the current window
+#         # K_window, V_window shape: (B, H, WindowLength, D)
+#         K_window = K[:, :, start_index:end_index, :]
+#         V_window = V[:, :, start_index:end_index, :]
 
-        # Alibi_window shape: (H, 1, WindowLength)
-        # We slice the L x L alibi matrix: all heads, row 'i', columns 'start' to 'end'
-        Alibi_window = alibi_bias[:, i:i+1, start_index:end_index]
+#         # Alibi_window shape: (H, 1, WindowLength)
+#         # We slice the L x L alibi matrix: all heads, row 'i', columns 'start' to 'end'
+#         Alibi_window = alibi_bias[:, i:i+1, start_index:end_index]
 
-        # 4. Compute Attention Scores (B, H, 1, WindowLength)
-        # S = (Q_i @ K_window^T) * scale
-        Attention_Scores = tf.matmul(Q_i, K_window, transpose_b=True) * scale
+#         # 4. Compute Attention Scores (B, H, 1, WindowLength)
+#         # S = (Q_i @ K_window^T) * scale
+#         Attention_Scores = tf.matmul(Q_i, K_window, transpose_b=True) * scale
 
-        # 5. Apply ALiBi Bias
-        # The bias needs to be broadcastable to the scores (B, H, 1, WindowLength)
-        # Alibi_window is (H, 1, WindowLength). It broadcasts across B and the Q sequence length (which is 1).
-        Attention_Scores += Alibi_window
+#         # 5. Apply ALiBi Bias
+#         # The bias needs to be broadcastable to the scores (B, H, 1, WindowLength)
+#         # Alibi_window is (H, 1, WindowLength). It broadcasts across B and the Q sequence length (which is 1).
+#         Attention_Scores += Alibi_window
 
-        causal_mask_i = causal_mask[i:i+1, start_index:end_index]
+#         causal_mask_i = causal_mask[i:i+1, start_index:end_index]
 
-        # reshape to broadcast → (1, 1, 1, W_len)
-        causal_mask_i = tf.reshape(causal_mask_i, (1, 1, 1, -1))
+#         # reshape to broadcast → (1, 1, 1, W_len)
+#         causal_mask_i = tf.reshape(causal_mask_i, (1, 1, 1, -1))
 
-        # apply padding mask
+#         # apply padding mask
 
-        Attention_Scores += causal_mask_i * NEG_INF
+#         Attention_Scores += causal_mask_i * NEG_INF
 
         
 
-        # 6. Apply Softmax (normalize across the WindowLength dimension)
-        Attention_Weights = tf.nn.softmax(Attention_Scores, axis=-1)
+#         # 6. Apply Softmax (normalize across the WindowLength dimension)
+#         Attention_Weights = tf.nn.softmax(Attention_Scores, axis=-1)
 
-        # 7. Compute Weighted Sum (B, H, 1, D)
-        # Output_i = Attention_Weights @ V_window
-        Output_i = tf.matmul(Attention_Weights, V_window)
+#         # 7. Compute Weighted Sum (B, H, 1, D)
+#         # Output_i = Attention_Weights @ V_window
+#         Output_i = tf.matmul(Attention_Weights, V_window)
 
-        # 8. Write the result to TensorArray
-        # Squeeze the sequence dimension (axis=2) to match element_shape [B, H, D]
-        output_ta = output_ta.write(i, tf.squeeze(Output_i, axis=2))
+#         # 8. Write the result to TensorArray
+#         # Squeeze the sequence dimension (axis=2) to match element_shape [B, H, D]
+#         output_ta = output_ta.write(i, tf.squeeze(Output_i, axis=2))
 
-    # --- End Iterative Window Attention ---
+#     # --- End Iterative Window Attention ---
 
-    # 9. Gather from TensorArray and Concatenate
-    # Stack creates (L, B, H, D)
-    out = output_ta.stack()
+#     # 9. Gather from TensorArray and Concatenate
+#     # Stack creates (L, B, H, D)
+#     out = output_ta.stack()
 
-    # 10. Reorder dimensions back to (B, H, L, D)
-    out = tf.transpose(out, perm=[1, 2, 0, 3])
-    return out
+#     # 10. Reorder dimensions back to (B, H, L, D)
+#     out = tf.transpose(out, perm=[1, 2, 0, 3])
+#     return out
 
 #------------------alternative--------------------
 
@@ -337,3 +394,272 @@ class CausalSelfAttentionWithALiBi(tf.keras.layers.Layer):
         # x: (B, L, d_model)
         B = tf.shape(x)[0]
         L = tf.shape(x)[1]
+        H = self.num_heads
+        D = self.head_dim
+
+        # Linear projections -> (B, L, H*D)
+        q = tf.matmul(x, self.Wq)
+        k = tf.matmul(x, self.Wk)
+        v = tf.matmul(x, self.Wv)
+
+        # reshape -> (B, L, H, D) -> transpose -> (B, H, L, D)
+        q = tf.transpose(tf.reshape(q, (B, L, H, D)), perm=[0, 2, 1, 3])
+        k = tf.transpose(tf.reshape(k, (B, L, H, D)), perm=[0, 2, 1, 3])
+        v = tf.transpose(tf.reshape(v, (B, L, H, D)), perm=[0, 2, 1, 3])
+
+        alibi_bias = None
+        if self.use_alibi:
+            # build ALiBi for this sequence (H, L, L)
+            alibi_bias = build_alibi_bias(H, L)
+
+        # Use naive (correct & graph-friendly) causal attention
+        attn_out = longformer_sliding_window_attention(q, k, v, alibi_bias=alibi_bias, mask_future=mask_future)  # (B,H,L,D)
+
+        # transpose back and combine heads -> (B, L, H*D)
+        attn_out = tf.transpose(attn_out, perm=[0, 2, 1, 3])
+        attn_out = tf.reshape(attn_out, (B, L, H * D))
+
+        # final linear
+        out = tf.matmul(attn_out, self.Wo)  # (B, L, d_model)
+        return out
+
+# ----------------------
+# Feed-forward network
+# ----------------------
+def point_wise_feed_forward_network(d_model, dff):
+    return tf.keras.Sequential([
+        tf.keras.layers.Dense(dff, activation=tf.nn.gelu),
+        tf.keras.layers.Dense(d_model)
+    ])
+
+# ----------------------
+# Decoder-only Transformer Layer
+# ----------------------
+class DecoderOnlyLayer(tf.keras.layers.Layer):
+    def __init__(self, d_model, num_heads, dff, rate=0.05, **kwargs):
+        super().__init__(**kwargs)
+        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+        head_dim = d_model // num_heads
+
+        self.mha = CausalSelfAttentionWithALiBi(num_heads=num_heads, head_dim=head_dim, use_alibi=True)
+        self.ffn = point_wise_feed_forward_network(d_model, dff)
+
+        self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+
+        self.dropout1 = tf.keras.layers.Dropout(rate)
+        self.dropout2 = tf.keras.layers.Dropout(rate)
+
+    def call(self, x, training=False, look_ahead_mask=None):
+        # Pre-norm (LayerNorm before attention)
+        x_norm = self.layernorm1(x)
+
+        # pass mask_future flag if look_ahead_mask is provided (we only support causal mask for now)
+        mask_future = True if look_ahead_mask is None else True
+        attn_output = self.mha(x_norm, mask_future=mask_future)  # (B, L, d_model)
+        attn_output = self.dropout1(attn_output, training=training)
+        out1 = x + attn_output
+
+        out1_norm = self.layernorm2(out1)
+        ffn_output = self.ffn(out1_norm)
+        ffn_output = self.dropout2(ffn_output, training=training)
+        out2 = out1 + ffn_output
+        return out2
+
+# ----------------------
+# Decoder-only Transformer model
+# ----------------------
+class DecoderOnlyTransformer(tf.keras.Model):
+    def __init__(self, num_layers, d_model, num_heads, dff, vocab_size, maximum_position_encoding, rate=0.05):
+        super().__init__()
+        assert d_model % num_heads == 0
+        self.d_model = d_model
+        self.num_layers = num_layers
+
+        self.embedding = tf.keras.layers.Embedding(vocab_size, d_model)
+        self.pos_encoding = positional_encoding(maximum_position_encoding, d_model)
+
+        self.dec_layers = [DecoderOnlyLayer(d_model, num_heads, dff, rate) for _ in range(num_layers)]
+        self.dropout = tf.keras.layers.Dropout(rate)
+        self.final_layer = tf.keras.layers.Dense(vocab_size)
+
+    def call(self, x, training=False, look_ahead_mask=None):
+        seq_len = tf.shape(x)[1]
+        x = self.embedding(x)  # (B, seq_len, d_model)
+        x *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
+        x = x + self.pos_encoding[:, :seq_len, :]
+
+        x = self.dropout(x, training=training)
+
+        for i in range(self.num_layers):
+            x = self.dec_layers[i](x, training=training, look_ahead_mask=look_ahead_mask)
+
+        logits = self.final_layer(x)  # (B, seq_len, vocab_size)
+        return logits
+
+
+
+import os
+import shutil
+news = pd.read_csv("/kaggle/input/193k-medium-articles-dataset-for-llm-finetuning/193k.csv")
+news = news.head(1000)
+
+# -------------------------
+# CLEAN TEXT
+# -------------------------
+def preprocess(text):
+    # text = re.sub(r"&.[1-9]+;", " ", text)
+    text = re.sub(r"&[1-9]+", " ", text)
+
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+titles = news["title"].astype(str).apply(preprocess)
+texts = news["text"].astype(str).apply(preprocess)
+
+# -------------------------
+# BUILD TRAINING TEXTS
+# -------------------------
+train_texts = []
+for t, s in zip(titles, texts):
+    combined = f"<BOS> {t} <SEP> {s} <EOS>"
+    train_texts.append(combined)
+
+# -------------------------
+# TOKENIZER
+# -------------------------
+tokenizer = tf.keras.preprocessing.text.Tokenizer(oov_token="<unk>")
+tokenizer.fit_on_texts(train_texts)
+vocab_size = len(tokenizer.word_index) + 1
+
+sequences = tokenizer.texts_to_sequences(train_texts)
+padded = tf.keras.preprocessing.sequence.pad_sequences(sequences, maxlen=SEQ_LEN + 1, padding='post', truncating='post')
+
+# -------------------------
+# SHIFTED INPUT/TARGETS
+# -------------------------
+inputs = padded[:, :-1]
+targets = padded[:, 1:]
+
+dataset = tf.data.Dataset.from_tensor_slices((inputs, targets))
+dataset = dataset.shuffle(BUFFER_SIZE).batch(BATCH_SIZE, drop_remainder=True)
+
+print(f"✅ Dataset ready. Vocab size: {vocab_size}, Shape: {inputs.shape}")
+
+
+model = DecoderOnlyTransformer(
+    num_layers=NUM_LAYERS,
+    d_model=EMBED_DIM,
+    num_heads=NUM_HEADS,
+    dff=DFF,
+    vocab_size=vocab_size,
+    maximum_position_encoding=SEQ_LEN,
+    rate=DROPOUT
+)
+
+# ------------------------
+# CHECKPOINT SETU
+# ------------------------
+import shutil
+# src ="/kaggle/input/test-model-test2"
+# dst = "/kaggle/working/test-model-test2"
+# shutil.copytree(src, dst, dirs_exist_ok=True)
+checkpoint_path = "/kaggle/working/transformer_epoch_{epoch:20b}.weights.h5"
+checkpoint_cb = tf.keras.callbacks.ModelCheckpoint(
+    checkpoint_path,
+    save_weights_only=True,
+    monitor='loss',
+    verbose=1,
+    save_freq='epoch'
+)
+
+# dummy_inp = tf.random.uniform((1, SEQ_LEN), dtype=tf.int64, minval=0, maxval=200) 
+# dummy_tar = tf.random.uniform((1, SEQ_LEN), dtype=tf.int64, minval=0, maxval=200) 
+# _ = logits = model(dummy_inp, training=False) # ====== STEP 2: Load Pretrained Weights ====== 
+# model.load_weights("/kaggle/input/nextword-prediction/transformer_generation.weights.h5")
+# print("checkpoint has successfully loade")
+
+class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
+    def __init__(self, d_model, warmup_steps=4000):
+        super().__init__()
+        self.d_model = tf.cast(d_model, tf.float32)
+        self.warmup_steps = warmup_steps
+
+    def __call__(self, step):
+        step = tf.cast(step, tf.float32)
+        arg1 = tf.math.rsqrt(step)
+        arg2 = step * (self.warmup_steps ** -1.5)
+        return tf.math.rsqrt(self.d_model) * tf.math.minimum(arg1, arg2)
+
+
+# lr = CustomSchedule(EMBED_DI
+loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+optimizer = tf.keras.optimizers.Adam(learning_rate=LR)
+
+model.compile(optimizer=optimizer, loss=loss_fn, metrics=['sparse_categorical_accuracy'])
+model.fit(dataset, epochs=EPOCHS, callbacks=[checkpoint_cb])
+# model.fit(dataset, epochs=EPOCHS)
+
+# -------------------------
+# SAVE WEIGHT
+# -------------------------
+model.save_weights(checkpoint_path)
+print("✅ Model training complete and weights saved")
+
+# -------------------------
+# TEXT GENERATION FUNCTION
+# -------------------------
+def generate_text_greedy(model, tokenizer, prompt, max_gen=50):
+    token_list = tokenizer.texts_to_sequences([f"<BOS> {prompt} <SEP>"])[0]
+    if len(token_list) > SEQ_LEN:
+        token_list = token_list[-SEQ_LEN:]
+    input_seq = tf.expand_dims(token_list, 0)
+
+    generated = []
+    for _ in range(max_gen):
+        logits = model(input_seq, training=False)
+        next_id = tf.argmax(logits[:, -1, :], axis=-1).numpy()[0]
+        next_word = tokenizer.index_word.get(next_id, "<unk>")
+        if next_word == "<EOS>":
+            break
+        generated.append(next_word)
+        input_seq = tf.concat([input_seq[:, 1:], [[next_id]]], axis=-1)
+
+    return prompt + " " + " ".join(generated)
+
+# -------------------------
+# EXAMPLE GENERATIO
+# -------------------------
+prompt = "I was sick"
+print("\n🧾 Generated Text:\n")
+print(generate_text_greedy(model, tokenizer, prompt, max_gen=60))
+
+# B = 2       # batch
+# H = 4       # number of heads
+# L = 16      # sequence length
+# D = 8       # head dimension
+# window_size = 64
+
+# # (B, H, L, D)
+# Q = tf.random.normal((B, H, L, D))
+# K = tf.random.normal((B, H, L, D))
+# V = tf.random.normal((B, H, L, D))
+
+# def build_alibi(H, L):
+#     slopes = 1.0 / (2 ** tf.linspace(0.0, 1.0, H))
+#     pos = tf.range(L, dtype=tf.float32)
+#     rel_pos = tf.expand_dims(pos, 0) - tf.expand_dims(pos, 1)
+#     rel_pos = tf.maximum(rel_pos, 0.0)
+#     alibi = slopes[:, None, None] * rel_pos[None, :, :]
+#     return alibi
+
+# alibi_bias = build_alibi(H, L)
+# mask_future=True
+# # -----------------------
+# # -----------------------
+# output = longformer_sliding_window_attention(Q, K, V,alibi_bias,mask_future)
+
+# # -----------------------
+# # Print final output shape
+# # -----------------------
+# print("✅ Output shape:", output.shape)
