@@ -62,6 +62,7 @@ import tensorflow as tf
 import numpy as np
 import math
 
+#-----------------------gpu-optimized0window attention---------------------------
 @tf.function
 def longformer_sliding_window_attention(Q, K, V, alibi_bias=None, mask_future=True):
     """
