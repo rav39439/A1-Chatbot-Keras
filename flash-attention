@@ -1,0 +1,738 @@
+
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+from collections import defaultdict
+import string
+import tensorflow as tf
+import re
+import os
+import time
+from tensorflow import keras
+from tensorflow.keras.layers import Dense, Input
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.models import Model
+from tensorflow.keras.callbacks import ModelCheckpoint
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.model_selection import train_test_split
+
+ENCODER_LEN = 200
+DECODER_LEN = 70
+# BATCH_SIZE = 
+# BUFFER_SIZE = BATCH_SIZE*8
+# ENCODER_LEN = 140
+# DECODER_LEN = 100
+# BATCH_SIZE = 16
+# BUFFER_SIZE = BATCH_SIZE * 8
+# news = pd.read_csv("/kaggle/input/summerization-sample/summarization_100000.csv")
+# news = news.head(20000)
+# print(news
+# print(news.columns)
+
+
+import tensorflow as tf
+import numpy as np
+import re
+
+# -------------------------
+# Parameters
+# -------------------------
+# seq_len = 20  # max length of input sequences
+# BATCH_SIZE = 32
+# BUFFER_SIZE = 10000
+# EMBED_DIM = 128
+# NUM_HEADS = 4
+# DFF = 512
+# NUM_LAYERS = 3
+# DROPOUT = 0.1
+# EPOCHS = 10
+SEQ_LEN = 32     # number of tokens in decoder input (window size for model in
+WINDOW = SEQ_LEN + 1    # we create windows of length SEQ_LEN+1 then split to input/target
+BATCH_SIZE = 4
+BUFFER_SIZE = 20000
+EMBED_DIM = 256
+NUM_HEADS = 8
+DFF = 1024
+NUM_LAYERS = 4
+DROPOUT = 0.1
+EPOCHS = 4
+LR = 3e-4
+
+import tensorflow as tf
+import numpy as np
+import math
+
+@tf.function
+def longformer_sliding_window_attention(Q, K, V, alibi_bias=None, mask_future=True):
+    """
+    Vectorized Longformer-style local window attention.
+    SAME LOGIC as your loop version, but GPU-friendly and fully batched.
+    """
+
+    window_size = 32
+    B, H, L, D = tf.unstack(tf.shape(Q))
+    W = window_size // 2
+
+    # scaling
+    scale = tf.math.rsqrt(tf.cast(D, Q.dtype))
+
+    # -----------------------------
+    # 1. Build full (B,H,L,L) scores = Q @ K^T
+    # -----------------------------
+    # (B,H,L,D) @ (B,H,D,L) -> (B,H,L,L)
+    scores_full = tf.matmul(Q, K, transpose_b=True) * scale
+
+    # -----------------------------
+    # 2. Add ALiBi (H,L,L) -> (B,H,L,L)
+    # -----------------------------
+    if alibi_bias is not None:
+        scores_full += alibi_bias[None, :, :, :]
+
+    # -----------------------------
+    # 3. Build sliding-window mask (L,L)
+    # -----------------------------
+    position_ids = tf.range(L)
+    dist = tf.abs(position_ids[None, :] - position_ids[:, None])   # (L,L)
+    window_mask = tf.cast(dist > W, Q.dtype)                       # 1 = out of window
+
+    NEG_INF = tf.constant(-1e9, dtype=Q.dtype)
+    scores_full += window_mask[None, None, :, :] * NEG_INF
+
+    # -----------------------------
+    # 4. Add causal mask (upper triangle)
+    # -----------------------------
+    if mask_future:
+        lower = tf.linalg.band_part(tf.ones((L, L), dtype=Q.dtype), -1, 0)
+        print("sssdd")
+        causal_mask = 1.0 - lower
+        scores_full += causal_mask[None, None, :, :] * NEG_INF
+
+    # -----------------------------
+    # 5. Softmax over last dimension (windowed because invalid entries = -inf)
+    # -----------------------------
+    attn_weights = tf.nn.softmax(scores_full, axis=-1)  # (B,H,L,L)
+
+    # -----------------------------
+    # 6. Weighted sum of values
+    # ----------------------------
+    out = tf.matmul(attn_weights, V)   # (B,H,L,D)
+
+    return out
+
+
+import tensorflow as tf
+
+
+# @tf.function
+# def flashattention_longformer_gpu(Q, K, V, window_size=32, alibi_bias=None, mask_future=True):
+#     B, H, L, D = tf.unstack(tf.shape(Q))
+#     W = tf.cast(window_size // 2, tf.int32)
+#     scale = 1.0 / tf.math.sqrt(tf.cast(D, Q.dtype))
+
+#     # 1. Longformer sliding window mask
+#     pos = tf.range(L)
+#     dist = tf.abs(pos[:, None] - pos[None, :])
+#     window_mask = dist > W
+
+#     if mask_future:
+#         causal = tf.linalg.band_part(tf.ones((L, L)), -1, 0)
+#         print("master")
+#         causal = tf.cast(1 - causal, tf.bool)
+#         window_mask = tf.logical_or(window_mask, causal)
+
+#     window_mask = tf.cast(window_mask, Q.dtype)
+
+#     # 2. Blockify for FlashAttention-style parallelism
+#     block = 64
+#     pad = (block - (L % block)) % block
+
+#     Qp = tf.pad(Q, [[0,0], [0,0], [0,pad], [0,0]])
+#     Kp = tf.pad(K, [[0,0], [0,0], [0,pad], [0,0]])
+#     Vp = tf.pad(V, [[0,0], [0,0], [0,pad], [0,0]])
+
+#     Lp = tf.shape(Qp)[2]
+#     n_blocks = Lp // block
+
+#     Q_blk = tf.reshape(Qp, (B, H, n_blocks, block, D))
+#     K_blk = tf.reshape(Kp, (B, H, n_blocks, block, D))
+#     V_blk = tf.reshape(Vp, (B, H, n_blocks, block, D))
+
+#     # 3. Correct FlashAttention blockwise QKᵀ
+#     scores_blk = tf.einsum("bhqxd,bhkyd->bhqxky", Q_blk * scale, K_blk)
+
+#     # 4. Reshape back to (B,H,Lp,Lp)
+#     scores = tf.reshape(scores_blk, (B, H, Lp, Lp))
+
+#     # 5. Crop padding
+#     scores = scores[:, :, :L, :L]
+
+#     # 6. Add ALiBi
+#     if alibi_bias is not None:
+#         scores += alibi_bias
+
+#     # 7. Apply Longformer sliding window mask
+#     scores += window_mask[None, None, :, :] * -1e9
+
+#     # 8. Softmax
+#     attn = tf.nn.softmax(scores, axis=-1)
+
+#     # 9. Weighted V sum
+#     out = tf.matmul(attn, V)  # (B,H,L,D)
+
+#     return out
+
+
+import tensorflow as tf
+
+@tf.function
+def gpt_flashattention_longformer(Q, K, V,alibi_bias=None, mask_future=True):
+    """
+    GPT-style FlashAttention optimized for Longformer sliding windows.
+    Computes only local windows -> O(L*window_size*D) complexity.
+    
+    Inputs:
+        Q, K, V: (B,H,L,D)
+        window_size: int
+        alibi_bias: (B,H,L,L) or (H,L,L)
+        mask_future: bool
+    Returns:
+        out: (B,H,L,D)
+        
+    """
+
+    window_size=32
+    B, H, L, D = tf.unstack(tf.shape(Q))
+    # W = tf.cast(window_size // 2, tf.int32)
+    scale = 1.0 / tf.math.sqrt(tf.cast(D, Q.dtype))
+    
+    # --------------------------------------
+    # 1. Compute local window indices
+    # --------------------------------------
+    # For each position i, we attend to max(0,i-W):min(L,i+W+1)
+    # Create a (L, 2*W+1) window index tensor
+    W = window_size // 2              # Python int
+    max_window = 2 * W + 1           # Python int
+
+    left = tf.maximum(tf.range(L, dtype=tf.int32)[:, None] - W, 0)
+    right = tf.minimum(tf.range(L, dtype=tf.int32)[:, None] + W + 1, L)
+   
+    print(max_window)
+    print(left)
+    print(right)
+
+# create sliding window indices
+    rel_idx = tf.range(max_window)[None, :] + tf.zeros((L,1), tf.int32)  # shape (L, max_window)
+    
+    # Clip to valid range
+    mask_valid = (rel_idx >= 0) & (rel_idx < L)
+    
+    # --------------------------------------
+    # 2. Gather K/V per local window
+    # --------------------------------------
+    # Broadcast batch and head
+    Q_ = tf.reshape(Q, (B*H, L, D))
+    K_ = tf.reshape(K, (B*H, L, D))
+    V_ = tf.reshape(V, (B*H, L, D))
+    
+    # Gather sliding windows
+    idx = tf.clip_by_value(rel_idx, 0, L-1)  # (L, max_window)
+    K_windows = tf.gather(K_, idx, axis=1)   # (B*H, L, max_window, D)
+    V_windows = tf.gather(V_, idx, axis=1)   # (B*H, L, max_window, D)
+    
+    # --------------------------------------
+    # 3. Compute QK^T for each window
+    # --------------------------------------
+    Q_ = Q_[:, :, None, :]           # (B*H, L, 1, D)
+    scores = tf.reduce_sum(Q_ * K_windows, axis=-1)  # (B*H, L, max_window)
+    scores *= scale
+    
+    # --------------------------------------
+    # 4. Apply ALiBi if provided
+    # --------------------------------------
+
+    # if alibi_bias is not None:
+    # # Make sure batch dimension exists
+    # if len(alibi_bias.shape) == 3:  # (H,L,L)
+    #     alibi_bias = tf.expand_dims(alibi_bias, 0)  # (1,H,L,L)
+
+    # # Broadcast to batch dimension
+    # alibi_bias = tf.broadcast_to(alibi_bias, (B, H, L, L))
+
+    # scores += alibi_bias  # (B,H,L,L) added directly
+   
+    # --------------------------------------
+    # 5. Apply causal / window mask
+    # --------------------------------------
+    if mask_future:
+        mask = tf.range(max_window)[None, :] > (right - left - 1)  # (L, max_window)
+        mask = tf.cast(mask, Q.dtype)
+        scores -= 1e9 * mask[None, :, :]
+    
+    # Mask positions outside sequence
+    scores -= 1e9 * (1 - tf.cast(mask_valid, Q.dtype))[None, :, :]
+    
+    # --------------------------------------
+    # 6. Softmax over window
+    # --------------------------------------
+    attn = tf.nn.softmax(scores, axis=-1)  # (B*H, L, max_window)
+    
+    # --------------------------------------
+    # 7. Weighted sum of V
+    # --------------------------------------
+    out = tf.reduce_sum(attn[:, :, :, None] * V_windows, axis=2)  # (B*H, L, D)
+    out = tf.reshape(out, (B, H, L, D))
+    
+    return out
+     
+    # B, H, L, D_int = tf.unstack(tf.shape(Q))
+    # D = tf.cast(D_int, Q.dtype)
+    # scale = 1.0 / tf.math.sqrt(D)
+
+    # # Half-window size
+    # W = window_size // 2
+    # max_window = 2 * W + 1 # e.g., 33
+
+    # # --------------------------------------
+    # # 1. Compute correct sliding window indices
+    # # --------------------------------------
+    # # Relative offsets: [-W, ..., 0, ..., W]
+    # rel_offsets = tf.range(-W, W + 1, dtype=tf.int32) # (max_window,)
+
+    # # Query indices (i): [0, 1, 2, ..., L-1]
+    # q_indices = tf.range(L, dtype=tf.int32)[:, None] # (L, 1)
+
+    # # Absolute key indices (j) = i + rel_offset. This is what we will gather.
+    # # abs_k_indices: (L, max_window)
+    # abs_k_indices = q_indices + rel_offsets[None, :]
+
+    # # --------------------------------------
+    # # 2. Validity Mask and Clipping
+    # # --------------------------------------
+    # # Mask is True where index j is within the sequence bounds [0, L-1]
+    # mask_valid = (abs_k_indices >= 0) & (abs_k_indices < L) # (L, max_window)
+
+    # # Clip indices outside of [0, L-1] to a safe index (e.g., 0)
+    # clipped_k_indices = tf.clip_by_value(abs_k_indices, 0, L - 1) # (L, max_window)
+
+    # # --------------------------------------
+    # # 3. Gather K and V windows
+    # # --------------------------------------
+    # Q_flat = tf.reshape(Q, (B * H, L, D_int))
+    # K_flat = tf.reshape(K, (B * H, L, D_int))
+    # V_flat = tf.reshape(V, (B * H, L, D_int))
+
+    # # Gather K_windows and V_windows: (B*H, L, max_window, D)
+    # K_windows = tf.gather(K_flat, clipped_k_indices, axis=1, batch_dims=1)
+    # V_windows = tf.gather(V_flat, clipped_k_indices, axis=1, batch_dims=1)
+
+    # # --------------------------------------
+    # # 4. Compute QK^T for each window
+    # # --------------------------------------
+    # # Q_expanded: (B*H, L, 1, D)
+    # Q_expanded = Q_flat[:, :, None, :]
+
+    # # scores: (B*H, L, max_window)
+    # scores = tf.reduce_sum(Q_expanded * K_windows, axis=-1)
+    # scores *= scale
+
+    # NEG_INF = tf.constant(-1e9, dtype=Q.dtype)
+
+    # # --------------------------------------
+    # # 5. Apply Causal and Validity Masks
+    # # --------------------------------------
+
+    # # Causal Mask: Key index j > Query index i (i.e., rel_offset > 0)
+    # if mask_future:
+    #     # Create a 2D map of relative offsets
+    #     rel_indices_2d = tf.tile(rel_offsets[None, :], [L, 1]) # (L, max_window)
+    #     # 1.0s where the key is in the future relative to the query
+    #     causal_mask = tf.cast(rel_indices_2d > 0, Q.dtype)
+    #     scores += causal_mask[None, :, :] * NEG_INF # Apply mask
+
+    # # Validity Mask: Mask out padded/clipped positions
+    # # 1.0s where the indices were outside sequence bounds
+    # validity_mask_float = tf.cast(mask_valid, Q.dtype) # (L, max_window)
+    # scores += (1.0 - validity_mask_float)[None, :, :] * NEG_INF
+
+    # # --------------------------------------
+    # # 6. Softmax and Weighted Sum
+    # # --------------------------------------
+    # attn = tf.nn.softmax(scores, axis=-1)  # (B*H, L, max_window)
+
+    # # out: (B*H, L, D)
+    # out = tf.reduce_sum(attn[:, :, :, None] * V_windows, axis=2)
+
+    # # Reshape back to (B, H, L, D)
+    # out = tf.reshape(out, (B, H, L, D_int))
+
+    # return out
+
+def get_angles(pos, i, d_model):
+    angle_rates = 1 / np.power(10000, (2 * (i // 2)) / np.float32(d_model))
+    return pos * angle_rates
+
+def positional_encoding(position, d_model):
+    angle_rads = get_angles(np.arange(position)[:, np.newaxis],
+                            np.arange(d_model)[np.newaxis, :],
+                            d_model)
+    angle_rads[:, 0::2] = np.sin(angle_rads[:, 0::2])
+    angle_rads[:, 1::2] = np.cos(angle_rads[:, 1::2])
+    pos_encoding = angle_rads[np.newaxis, ...].astype(np.float32)  # (1, position, d_model)
+    return tf.constant(pos_encoding)  # shape (1, position, d_model)
+
+def create_look_ahead_mask(size):
+    # 1's for future positions (to be masked), 0's for allowed positions
+    mask = 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
+    return mask  # (seq_len, seq_len)
+
+# ----------------------
+# ALiBi helpers
+# ----------------------
+def get_alibi_slopes(n_heads: int):
+    def get_slopes_power_of_2(n):
+        start = 2 ** (-2 ** -(math.log2(n) - 3))
+        ratio = start
+        return [start * (ratio ** i) for i in range(n)]
+    if math.log2(n_heads).is_integer():
+        slopes = get_slopes_power_of_2(n_heads)
+    else:
+        m = 1 << (math.ceil(math.log2(n_heads)))
+        slopes = get_slopes_power_of_2(m)
+        slopes = slopes[:n_heads]
+    return tf.constant(slopes, dtype=tf.float32)  # (n_heads,)
+
+def build_alibi_bias(n_heads: int, seq_len: int):
+    slopes = get_alibi_slopes(n_heads)  # (n_heads,)
+    idxs = tf.range(seq_len, dtype=tf.int32)
+    dist = tf.cast(tf.expand_dims(idxs, 1) - tf.expand_dims(idxs, 0), tf.float32)  # (seq_len, seq_len)
+    bias = -tf.reshape(slopes, (n_heads, 1, 1)) * tf.reshape(dist, (1, seq_len, seq_len))  # (n_heads, seq_len, seq_len)
+    return bias
+
+# ----------------------
+# Naive causal self-attention (TensorFlow)
+# Q,K,V shapes: (batch, heads, seq_len, head_dim)
+# ----------------------
+def causal_self_attention_naive(Q, K, V, alibi_bias=None, mask_future=True):
+    d = tf.cast(tf.shape(Q)[-1], tf.float32)  # head dimension
+    scores = tf.matmul(Q, K, transpose_b=True) / tf.math.sqrt(d)  # (B, H, L, L)
+
+    if alibi_bias is not None:
+        # alibi_bias: (H, L, L) -> expand to (1, H, L, L)
+        scores += tf.expand_dims(alibi_bias, 0)
+
+    if mask_future:
+        L = tf.shape(Q)[2]
+        # lower triangular (including diagonal) -> 1 for allowed
+        lower = tf.linalg.band_part(tf.ones((L, L)), -1, 0)
+        mask = 1.0 - lower  # 1 for future tokens
+        mask = tf.reshape(mask, (1, 1, L, L))  # (1,1,L,L)
+        scores = scores - 1e9 * mask
+
+    attn = tf.nn.softmax(scores, axis=-1)  # (B,H,L,L)
+    out = tf.matmul(attn, V)               # (B,H,L,head_dim)
+    return out
+
+# ----------------------
+# Multi-head layer with ALiBi - returns only attention output
+# ----------------------
+class CausalSelfAttentionWithALiBi(tf.keras.layers.Layer):
+    def __init__(self, num_heads, head_dim, use_alibi=True, **kwargs):
+        super().__init__(**kwargs)
+        assert head_dim > 0 and num_heads > 0
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.use_alibi = use_alibi
+
+    def build(self, input_shape):
+        d_model = int(input_shape[-1])
+        self.Wq = self.add_weight(name="Wq", shape=(d_model, self.num_heads * self.head_dim),
+                          initializer="glorot_uniform")
+        self.Wk = self.add_weight(name="Wk", shape=(d_model, self.num_heads * self.head_dim),
+                                  initializer="glorot_uniform")
+        self.Wv = self.add_weight(name="Wv", shape=(d_model, self.num_heads * self.head_dim),
+                                  initializer="glorot_uniform")
+        self.Wo = self.add_weight(name="Wo", shape=(self.num_heads * self.head_dim, d_model),
+                                  initializer="glorot_uniform")
+
+    def call(self, x, mask_future=True):
+        # x: (B, L, d_model)
+        B = tf.shape(x)[0]
+        L = tf.shape(x)[1]
+        H = self.num_heads
+        D = self.head_dim
+
+        # Linear projections -> (B, L, H*D)
+        q = tf.matmul(x, self.Wq)
+        k = tf.matmul(x, self.Wk)
+        v = tf.matmul(x, self.Wv)
+
+        # reshape -> (B, L, H, D) -> transpose -> (B, H, L, D)
+        q = tf.transpose(tf.reshape(q, (B, L, H, D)), perm=[0, 2, 1, 3])
+        k = tf.transpose(tf.reshape(k, (B, L, H, D)), perm=[0, 2, 1, 3])
+        v = tf.transpose(tf.reshape(v, (B, L, H, D)), perm=[0, 2, 1, 3])
+
+        alibi_bias = None
+        if self.use_alibi:
+            # build ALiBi for this sequence (H, L, L)
+            alibi_bias = build_alibi_bias(H, L)
+
+        # Use naive (correct & graph-friendly) causal attention
+        attn_out = gpt_flashattention_longformer(q, k, v, alibi_bias=alibi_bias, mask_future=mask_future)  # (B,H,L,D)
+
+        # transpose back and combine heads -> (B, L, H*D)
+        attn_out = tf.transpose(attn_out, perm=[0, 2, 1, 3])
+        attn_out = tf.reshape(attn_out, (B, L, H * D))
+
+        # final linear
+        out = tf.matmul(attn_out, self.Wo)  # (B, L, d_model)
+        return out
+
+# ----------------------
+# Feed-forward network
+# ----------------------
+def point_wise_feed_forward_network(d_model, dff):
+    return tf.keras.Sequential([
+        tf.keras.layers.Dense(dff, activation=tf.nn.gelu),
+        tf.keras.layers.Dense(d_model)
+    ])
+
+# ----------------------
+# Decoder-only Transformer Layer
+# ----------------------
+class DecoderOnlyLayer(tf.keras.layers.Layer):
+    def __init__(self, d_model, num_heads, dff, rate=0.05, **kwargs):
+        super().__init__(**kwargs)
+        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+        head_dim = d_model // num_heads
+
+        self.mha = CausalSelfAttentionWithALiBi(num_heads=num_heads, head_dim=head_dim, use_alibi=True)
+        self.ffn = point_wise_feed_forward_network(d_model, dff)
+
+        self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+
+        self.dropout1 = tf.keras.layers.Dropout(rate)
+        self.dropout2 = tf.keras.layers.Dropout(rate)
+
+    def call(self, x, training=False, look_ahead_mask=None):
+        # Pre-norm (LayerNorm before attention)
+        x_norm = self.layernorm1(x)
+
+        # pass mask_future flag if look_ahead_mask is provided (we only support causal mask for now)
+        mask_future = True if look_ahead_mask is None else True
+        attn_output = self.mha(x_norm, mask_future=mask_future)  # (B, L, d_model)
+        attn_output = self.dropout1(attn_output, training=training)
+        out1 = x + attn_output
+
+        out1_norm = self.layernorm2(out1)
+        ffn_output = self.ffn(out1_norm)
+        ffn_output = self.dropout2(ffn_output, training=training)
+        out2 = out1 + ffn_output
+        return out2
+
+# ----------------------
+# Decoder-only Transformer model
+# ----------------------
+class DecoderOnlyTransformer(tf.keras.Model):
+    def __init__(self, num_layers, d_model, num_heads, dff, vocab_size, maximum_position_encoding, rate=0.05):
+        super().__init__()
+        assert d_model % num_heads == 0
+        self.d_model = d_model
+        self.num_layers = num_layers
+
+        self.embedding = tf.keras.layers.Embedding(vocab_size, d_model)
+        self.pos_encoding = positional_encoding(maximum_position_encoding, d_model)
+
+        self.dec_layers = [DecoderOnlyLayer(d_model, num_heads, dff, rate) for _ in range(num_layers)]
+        self.dropout = tf.keras.layers.Dropout(rate)
+        self.final_layer = tf.keras.layers.Dense(vocab_size)
+
+    def call(self, x, training=False, look_ahead_mask=None):
+        seq_len = tf.shape(x)[1]
+        x = self.embedding(x)  # (B, seq_len, d_model)
+        x *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
+        x = x + self.pos_encoding[:, :seq_len, :]
+
+        x = self.dropout(x, training=training)
+
+        for i in range(self.num_layers):
+            x = self.dec_layers[i](x, training=training, look_ahead_mask=look_ahead_mask)
+
+        logits = self.final_layer(x)  # (B, seq_len, vocab_size)
+        return logits
+
+
+
+import os
+import shutil
+news = pd.read_csv("/kaggle/input/193k-medium-articles-dataset-for-llm-finetuning/193k.csv")
+news = news.head(10000)
+
+# -------------------------
+# CLEAN TEXT
+# -------------------------
+def preprocess(text):
+    # text = re.sub(r"&.[1-9]+;", " ", text)
+    text = re.sub(r"&[1-9]+", " ", text)
+
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+titles = news["title"].astype(str).apply(preprocess)
+texts = news["text"].astype(str).apply(preprocess)
+
+# -------------------------
+# BUILD TRAINING TEXTS
+# -------------------------
+train_texts = []
+for t, s in zip(titles, texts):
+    combined = f"<BOS> {t} <SEP> {s} <EOS>"
+    train_texts.append(combined)
+
+# -------------------------
+# TOKENIZER
+# -------------------------
+tokenizer = tf.keras.preprocessing.text.Tokenizer(oov_token="<unk>")
+tokenizer.fit_on_texts(train_texts)
+vocab_size = len(tokenizer.word_index) + 1
+
+sequences = tokenizer.texts_to_sequences(train_texts)
+padded = tf.keras.preprocessing.sequence.pad_sequences(sequences, maxlen=SEQ_LEN + 1, padding='post', truncating='post')
+
+# -------------------------
+# SHIFTED INPUT/TARGETS
+# -------------------------
+inputs = padded[:, :-1]
+targets = padded[:, 1:]
+
+dataset = tf.data.Dataset.from_tensor_slices((inputs, targets))
+dataset = dataset.shuffle(BUFFER_SIZE).batch(BATCH_SIZE, drop_remainder=True)
+
+print(f"✅ Dataset ready. Vocab size: {vocab_size}, Shape: {inputs.shape}")
+
+
+model = DecoderOnlyTransformer(
+    num_layers=NUM_LAYERS,
+    d_model=EMBED_DIM,
+    num_heads=NUM_HEADS,
+    dff=DFF,
+    vocab_size=vocab_size,
+    maximum_position_encoding=SEQ_LEN,
+    rate=DROPOUT
+)
+
+# ------------------------
+# CHECKPOINT SETU
+# ------------------------
+import shutil
+# src ="/kaggle/input/test-model-test2"
+# dst = "/kaggle/working/test-model-test2"
+# shutil.copytree(src, dst, dirs_exist_ok=True)
+checkpoint_path = "/kaggle/working/transformer_epoch_{epoch:20b}.weights.h5"
+checkpoint_cb = tf.keras.callbacks.ModelCheckpoint(
+    checkpoint_path,
+    save_weights_only=True,
+    monitor='loss',
+    verbose=1,
+    save_freq='epoch'
+)
+
+# dummy_inp = tf.random.uniform((1, SEQ_LEN), dtype=tf.int64, minval=0, maxval=200) 
+# dummy_tar = tf.random.uniform((1, SEQ_LEN), dtype=tf.int64, minval=0, maxval=200) 
+# _ = logits = model(dummy_inp, training=False) # ====== STEP 2: Load Pretrained Weights ====== 
+# model.load_weights("/kaggle/input/nextword-prediction/transformer_generation.weights.h5")
+# print("checkpoint has successfully loade")
+
+class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
+    def __init__(self, d_model, warmup_steps=4000):
+        super().__init__()
+        self.d_model = tf.cast(d_model, tf.float32)
+        self.warmup_steps = warmup_steps
+
+    def __call__(self, step):
+        step = tf.cast(step, tf.float32)
+        arg1 = tf.math.rsqrt(step)
+        arg2 = step * (self.warmup_steps ** -1.5)
+        return tf.math.rsqrt(self.d_model) * tf.math.minimum(arg1, arg2)
+
+
+# lr = CustomSchedule(EMBED_DI
+loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+optimizer = tf.keras.optimizers.Adam(learning_rate=LR)
+
+model.compile(optimizer=optimizer, loss=loss_fn, metrics=['sparse_categorical_accuracy'])
+model.fit(dataset, epochs=EPOCHS, callbacks=[checkpoint_cb])
+# model.fit(dataset, epochs=EPOCHS)
+
+# -------------------------
+# SAVE WEIGHT
+# -------------------------
+model.save_weights(checkpoint_path)
+print("✅ Model training complete and weights saved")
+
+# -------------------------
+# TEXT GENERATION FUNCTION
+# -------------------------
+def generate_text_greedy(model, tokenizer, prompt, max_gen=50):
+    token_list = tokenizer.texts_to_sequences([f"<BOS> {prompt} <SEP>"])[0]
+    if len(token_list) > SEQ_LEN:
+        token_list = token_list[-SEQ_LEN:]
+    input_seq = tf.expand_dims(token_list, 0)
+
+    generated = []
+    for _ in range(max_gen):
+        logits = model(input_seq, training=False)
+        next_id = tf.argmax(logits[:, -1, :], axis=-1).numpy()[0]
+        next_word = tokenizer.index_word.get(next_id, "<unk>")
+        if next_word == "<EOS>":
+            break
+        generated.append(next_word)
+        input_seq = tf.concat([input_seq[:, 1:], [[next_id]]], axis=-1)
+
+    return prompt + " " + " ".join(generated)
+
+# -------------------------
+# EXAMPLE GENERATIO
+# -------------------------
+prompt = "I was sick"
+print("\n🧾 Generated Text:\n")
+print(generate_text_greedy(model, tokenizer, prompt, max_gen=60))
+
+# B = 2       # batch
+# H = 4       # number of heads
+# L = 16      # sequence length
+# D = 8       # head dimension
+# window_size = 64
+
+# # (B, H, L, D)
+# Q = tf.random.normal((B, H, L, D))
+# K = tf.random.normal((B, H, L, D))
+# V = tf.random.normal((B, H, L, D))
+
+# # def build_alibi(H, L):
+# #     slopes = 1.0 / (2 ** tf.linspace(0.0, 1.0, H))
+# #     pos = tf.range(L, dtype=tf.float32)
+# #     rel_pos = tf.expand_dims(pos, 0) - tf.expand_dims(pos, 1)
+# #     rel_pos = tf.maximum(rel_pos, 0.0)
+# #     alibi = slopes[:, None, None] * rel_pos[None, :, :]
+# #     return alibi
+
+# def build_alibi(H, L):
+#     slopes = 1.0 / (2 ** tf.linspace(0.0, 1.0, H))
+#     pos = tf.range(L, dtype=tf.float32)
+#     rel_pos = tf.expand_dims(pos, 0) - tf.expand_dims(pos, 1)
+#     rel_pos = tf.maximum(rel_pos, 0.0)
+#     alibi = slopes[:, None, None] * rel_pos[None, :, :]
+#     return alibi
+
+# alibi_bias = build_alibi(H, L)
+# mask_future=True
+# # -----------------------
+# # -----------------------
+# output = gpt_flashattention_longformer(Q, K, V,alibi_bias,mask_future)
+
+# # -----------------------
+# # Print final output shape
+# # -----------------------
+# print("✅ Output shape:", output.shape)
