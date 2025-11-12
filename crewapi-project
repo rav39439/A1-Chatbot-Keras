@@ -1,0 +1,244 @@
+!-----------------------crew--------------------------------------------------
+
+from crewai import Agent, Crew, Process, Task
+from crewai.project import CrewBase, agent, crew, task
+from crewai.agents.agent_builder.base_agent import BaseAgent
+from typing import List
+# If you want to run a snippet of code before or after the crew starts,
+# you can use the @before_kickoff and @after_kickoff decorators
+# https://docs.crewai.com/concepts/crews#example-crew-class-with-decorators
+
+@CrewBase
+class Testcrew():
+    """Testcrew crew"""
+
+    agents: List[BaseAgent]
+    tasks: List[Task]
+
+    # Learn more about YAML configuration files here:
+    # Agents: https://docs.crewai.com/concepts/agents#yaml-configuration-recommended
+    # Tasks: https://docs.crewai.com/concepts/tasks#yaml-configuration-recommended
+    
+    # If you would like to add tools to your agents, you can learn more about it here:
+    # https://docs.crewai.com/concepts/agents#agent-tools
+    @agent
+    def researcher(self) -> Agent:
+        return Agent(
+            config=self.agents_config['researcher'], # type: ignore[index]
+            verbose=True
+        )
+
+    @agent
+    def analyst(self) -> Agent:
+        return Agent(
+            config=self.agents_config['analyst'], # type: ignore[index]
+            verbose=True
+        )
+
+    # To learn more about structured task outputs,
+    # task dependencies, and task callbacks, check out the documentation:
+    # https://docs.crewai.com/concepts/tasks#overview-of-a-task
+    @task
+    def research_task(self) -> Task:
+        return Task(
+            config=self.tasks_config['research_task'], # type: ignore[index]
+        )
+
+    @task
+    def analysis_task(self) -> Task:
+        return Task(
+            config=self.tasks_config['analysis_task'], # type: ignore[index]
+            output_file='report.md'
+        )
+
+    @crew
+    def crew(self) -> Crew:
+        """Creates the Testcrew crew"""
+        # To learn how to add knowledge sources to your crew, check out the documentation:
+        # https://docs.crewai.com/concepts/knowledge#what-is-knowledge
+
+        return Crew(
+            agents=self.agents, # Automatically created by the @agent decorator
+            tasks=self.tasks, # Automatically created by the @task decorator
+            process=Process.sequential,
+            verbose=True,
+            # process=Process.hierarchical, # In case you wanna use that instead https://docs.crewai.com/how-to/Hierarchical/
+        )
+!---------------------------------------------------------------------------------------------
+
+!-----------------------------main----------------------------------------------
+
+
+# #!/usr/bin/env python
+# import sys
+# import warnings
+
+# from datetime import datetime
+
+# from testcrew.crew import Testcrew
+
+# warnings.filterwarnings("ignore", category=SyntaxWarning, module="pysbd")
+
+# # This main file is intended to be a way for you to run your
+# # crew locally, so refrain from adding unnecessary logic into this file.
+# # Replace with inputs you want to test with, it will automatically
+# # interpolate any tasks and agents information
+
+# def run():
+#     """
+#     Run the crew.
+#     """
+#     inputs = {
+#         'company': 'Tesla',
+#         # 'current_year': str(datetime.now().year)
+#     }
+    
+#     try:
+#         result=Testcrew().crew().kickoff(inputs=inputs)
+#         print(result.raw)
+#     except Exception as e:
+#         raise Exception(f"An error occurred while running the crew: {e}")
+    
+# if __name__=="__main__":
+#     run()
+
+
+
+# # def train():
+# #     """
+# #     Train the crew for a given number of iterations.
+# #     """
+# #     inputs = {
+# #         "topic": "AI LLMs",
+# #         'current_year': str(datetime.now().year)
+# #     }
+# #     try:
+# #         Testcrew().crew().train(n_iterations=int(sys.argv[1]), filename=sys.argv[2], inputs=inputs)
+
+# #     except Exception as e:
+# #         raise Exception(f"An error occurred while training the crew: {e}")
+
+# # def replay():
+# #     """
+# #     Replay the crew execution from a specific task.
+# #     """
+# #     try:
+# #         Testcrew().crew().replay(task_id=sys.argv[1])
+
+# #     except Exception as e:
+# #         raise Exception(f"An error occurred while replaying the crew: {e}")
+
+# # def test():
+# #     """
+# #     Test the crew execution and returns the results.
+# #     """
+# #     inputs = {
+# #         "topic": "AI LLMs",
+# #         "current_year": str(datetime.now().year)
+# #     }
+    
+# #     try:
+# #         Testcrew().crew().test(n_iterations=int(sys.argv[1]), eval_llm=sys.argv[2], inputs=inputs)
+
+# #     except Exception as e:
+# #         raise Exception(f"An error occurred while testing the crew: {e}")
+
+#!/usr/bin/env python
+import warnings
+from datetime import datetime
+
+from testcrew.crew import Testcrew
+
+# Suppress irrelevant SyntaxWarnings from pysbd
+warnings.filterwarnings("ignore", category=SyntaxWarning, module="pysbd")
+
+
+def run():
+    """
+    Run the crew locally with sample input.
+    """
+    inputs = {
+        "company": "Tesla",
+        "current_year": str(datetime.now().year),
+    }
+
+    try:
+        result = Testcrew().crew().kickoff(inputs=inputs)
+        print(result.raw)
+    except Exception as e:
+        raise Exception(f"An error occurred while running the crew: {e}") from e
+
+
+if __name__ == "__main__":
+    run()
+
+#-command to create crewapi project---------------------
+
+
+
+--------------config/agents.--yaml--------------------------
+
+researcher:
+  role: >
+    Senior Financial Researcher for {company}.
+  goal: >
+    Conduct in-depth research on {company}, including its latest news, performance, and future potential.
+  backstory: >
+    You are a seasoned financial researcher with a strong ability to identify and analyze
+    relevant information about {company}. You are known for gathering high-quality data,
+    uncovering key insights, and presenting them in a clear, concise, and well-organized manner.
+  llm: ollama/llama3.2
+
+analyst:
+  role: >
+    Market Analyst and Report Writer focused on {company}.
+  goal: >
+    Analyze {company} and prepare a structured, comprehensive report that presents
+    key insights in a clear, professional, and engaging way.
+  backstory: >
+    You are a meticulous and skilled financial analyst with a strong background in
+    company research and market analysis. You excel at identifying patterns,
+    interpreting data-driven insights, and translating research findings into
+    compelling, well-crafted reports.
+  llm: ollama/llama3.2
+
+
+
+------------------------------config/task.yaml--------------------------
+
+research_task:
+  description: >
+    Conduct a thorough research on {company} and focus on:
+      1. Current company status and financial health.
+      2. Major challenges and opportunities.
+      3. Historical performance of the company.
+      4. Recent news and developments.
+      5. Future outlook and potential growth areas.
+    The current year is {current_year}.
+    Make sure to present the findings in a structured format with clear, labeled sections.
+  expected_output: >
+    A comprehensive research document with well-organized sections covering all the
+    requested aspects of {company}. Include specific facts, figures, and examples
+    wherever relevant.
+  agent: researcher
+
+analysis_task:
+  description: >
+    Analyze the research findings and create a comprehensive analytical report on {company}.
+    Your report should:
+      1. Begin with an executive summary.
+      2. Include all key information derived from the research.
+      3. Provide insights into trends, patterns, and strategic implications.
+      4. Offer a market outlook for {company}, noting that this should not be used
+         for trading or investment decisions.
+      5. Be formatted in a professional, easy-to-read style with clear headings and structure.
+    Ensure that the report is detailed, insightful, and captures all relevant information.
+  expected_output: >
+    A polished, professional report that presents the research findings along with
+    analytical insights. The report should include an executive summary, main analysis
+    sections, and a conclusion.
+  agent: analyst
+  context:
+    - research_task
+  output_file: output/report.md
+
