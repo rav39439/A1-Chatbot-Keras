@@ -1,0 +1,298 @@
+#-----------------------------Thread optimization--------------------------------
+
+
+
+from autogen_ext.models.ollama import OllamaChatCompletionClient
+ollamamodel_client = OllamaChatCompletionClient(model="llama3.2")
+
+from autogen_agentchat.messages import TextMessage
+message = TextMessage(content="I'd like to go to London", source="user")
+from autogen_agentchat.messages import TextMessage, MultiModalMessage
+
+
+from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
+from autogen_core import CancellationToken
+
+from autogen_ext.models.ollama import OllamaChatCompletionClient
+from autogen_core.models import UserMessage
+from autogen_agentchat.conditions import  TextMentionTermination
+
+from langchain_community.utilities import GoogleSerperAPIWrapper
+from langchain_core.tools import Tool
+from autogen_ext.tools.langchain import LangChainToolAdapter
+from dotenv import load_dotenv
+from autogen_agentchat.teams import RoundRobinGroupChat
+import os
+load_dotenv(override=True)
+
+
+# os.environ["SERPER_API_KEY"]= os.getenv("SERPER_API_KEY")
+# serper = GoogleSerperAPIWrapper()
+# langchain_serper =Tool(name="internet_search", func=serper.run, description="useful for when you need to search the internet")
+# autogen_serper = LangChainToolAdapter(langchain_serper)
+# prompt = """Find a one-way non-stop flight from Bangalore to Mumbai in November 2025."""
+
+
+ollama_client = OllamaChatCompletionClient(
+        model="llama3.2",  # Specify the model you pulled with Ollama
+)
+
+
+    # Example usage
+    # Run the async function (e.g., in an async context or with asyncio.run())
+
+# Agent 1: Parse ONTAP logs
+
+
+# User proxy
+user = UserProxyAgent(name="User")
+
+# --------------------------
+# Message Passing Workflow
+# --------------------------
+# async def process_log(log_text):
+#     # Step 1: LogParserAgent parses
+#     multi_modal_message = MultiModalMessage(content=[f"Parse this ONTAP log:\n{log_text}"], source="User")
+#     response = await LogParserAgent.on_messages([multi_modal_message], cancellation_token=CancellationToken())
+#     reply = response.chat_message.content
+
+#     print(reply)  # type: ignore
+#     multi_modal_message = MultiModalMessage(content=[f"Classify this defect:\n{reply}"], source="User")
+
+#     # Step 2: DefectClassifierAgent classifies
+#     classified = await ClientDefectClassifierAgent.on_messages([multi_modal_message], cancellation_token=CancellationToken())
+#     resultr = classified.chat_message.content
+
+#     classified1 = await ClusterDefectClassifierAgent.on_messages([multi_modal_message], cancellation_token=CancellationToken())
+#     resultr1 = classified1.chat_message.content
+
+#     classified2 = await TestScriptDefectClassifierAgent.on_messages([multi_modal_message], cancellation_token=CancellationToken())
+#     resultr2 = classified2.chat_message.content
+
+
+#     # # Step 3: SummaryAgent summarizes
+#     multi_modal_message = MultiModalMessage(content=[f"Summarize this:\nParsed Info: {reply}\nClassification: {resultr + ' ' + resultr1 + ' '+ resultr2}"], source="User")
+
+#     summarized = await SummaryAgent.on_messages([multi_modal_message], cancellation_token=CancellationToken())
+#     info = summarized.chat_message.content
+
+#     print(info)
+import asyncio
+import threading
+import traceback
+from concurrent.futures import ThreadPoolExecutor
+import functools
+
+ontap_log = """
+[2025-11-04 10:45:21] INFO  :: NATE::TestManager -> Initializing test session for ONTAP cluster 10.25.44.16
+[2025-11-04 10:45:21] DEBUG :: Loading test configuration from /etc/nate/config/ontap_cluster.conf
+[2025-11-04 10:45:21] INFO  :: Connecting to ONTAP management LIF 10.25.44.16 via HTTPS (port 443)
+[2025-11-04 10:45:22] DEBUG :: Using Perl SDK module NaServer.pm for API calls
+[2025-11-04 10:45:22] INFO  :: Preparing test harness for test cases: aggregate_resize_validation, qtree_clone_validation
+[2025-11-04 10:45:22] INFO  :: Starting test case 'aggregate_resize_validation'
+[2025-11-04 10:45:22] DEBUG :: Constructing XML request for aggregate_resize_validation
+<netapp xmlns="http://www.netapp.com/filer/admin" version="1.140">
+   <aggr-resize></aggr-resize>
+</netapp>
+[2025-11-04 10:45:22] ERROR :: NATE::TestManager -> Test script error: Missing mandatory parameter 'target_aggregate' in 'aggregate_resize_validation'
+[2025-11-04 10:45:23] WARN  :: Execution halted for 'aggregate_resize_validation' due to missing input parameter
+[2025-11-04 10:45:23] INFO  :: Logging defect: test-script-defect, subtype: missing-parameter
+[2025-11-04 10:45:23] DEBUG :: Skipping dependent subtests as aggregate_resize_validation failed
+[2025-11-04 10:45:24] INFO  :: Starting subtest 'qtree_clone_validation'
+[2025-11-04 10:45:24] DEBUG :: Validating test configuration for qtree_clone_validation
+[2025-11-04 10:45:25] ERROR :: NATE::TestManager -> Subtest failed: Missing 'source_qtree' parameter in test script
+[2025-11-04 10:45:25] WARN  :: Subtest 'qtree_clone_validation' skipped due to configuration error
+[2025-11-04 10:45:25] INFO  :: Logging defect: test-script-defect, subtype: configuration-error
+[2025-11-04 10:45:26] DEBUG :: Capturing XML request for qtree_clone_validation
+<netapp xmlns="http://www.netapp.com/filer/admin" version="1.140">
+   <qtree-clone-create></qtree-clone-create>
+</netapp>
+[2025-11-04 10:45:26] DEBUG :: XML Response indicates test skipped: status="failed" reason="Configuration error"
+[2025-11-04 10:45:27] INFO  :: Test session summary:
+   Total Test Cases: 2
+   Passed: 0
+   Failed: 2
+   Skipped: 1
+[2025-11-04 10:45:27] INFO  :: Defects recorded:
+   1. aggregate_resize_validation - Missing mandatory parameter 'target_aggregate'
+   2. qtree_clone_validation - Configuration error (missing 'source_qtree' parameter)
+[2025-11-04 10:45:28] INFO  :: NATE Test session completed successfully
+[2025-11-04 10:45:28] INFO  :: Session log saved to /var/log/nate/session_20251104_testscript_2.log
+"""
+
+def run_async_in_thread(coro_func, *args, **kwargs):
+    """
+    Runs an asyncio coroutine in a new event loop within a separate thread.
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        result = loop.run_until_complete(coro_func(*args, **kwargs))
+        return result
+    except Exception as e:
+        print(f"[{threading.current_thread().name}] ❌ Error in thread:")
+        traceback.print_exc()
+        return None  # You could also return e or raise again, depending on use case
+    
+
+LogParserAgent = AssistantAgent(
+    name="LogParserAgent",
+    system_message=(
+        "You are an expert in parsing error logs. Extract relevant information from ONTAP log for classifying the defect and convert it into a single paragraph "
+    
+    ),
+    model_client=ollama_client,
+)  
+
+# Agent 2: Classify defect type
+ClientDefectClassifierAgent = AssistantAgent(
+    name="DefectClassifierAgent",
+    system_message=(
+        "You are a defect classifier.Check if there is a failure in client tools, SDKs, or REST/API code interacting with ONTAP (e.g., Python traceback, JSON parsing error, HTTP issue, or REST mismatch) caused by schema or version incompatibility, serialization/connection bugs, or logic errors in external automation where ONTAP’s responses are valid. If thereis such a failure detected in provided parsed log then indicate that there is a defect in client side and also state a reason for this defect otherwise mention No client side defect detected."
+
+    ),
+    model_client=ollama_client,
+)
+
+ClusterDefectClassifierAgent = AssistantAgent(
+    name="DefectClassifierAgent",
+    system_message=(
+        "You are a defect classifier. Check if there is failure or the problem is caused by incorrect, inconsistent, or incomplete ONTAP cluster configuration—not test code. Also check for misconfigured nodes, quorum, interconnects, HA pairs, MetroCluster links, replication, or version mismatches. Check if the test code is correct, but expected cluster behavior fails and resolution requires correcting the cluster setup or re-initializing the environment. if any such failure mentioned is detected then mention that there is a defect in cluster configuraton and also state a reason otherwise mention no cluster config defect detected"
+    ),
+    model_client=ollama_client,
+)
+
+
+
+TestScriptDefectClassifierAgent = AssistantAgent(
+    name="DefectClassifierAgent",
+    system_message=(
+        "You are a defect classifier. Given parsed ONTAP log data, check if there is a defect related to the test automation, validation logic, or framework itself—not ONTAP. Also check for logic errors, incorrect validations, timing issues, or environment assumptions. Check whether ONTAP behaves correctly, but the test fails due to faulty test code or setup. If any of the mentioned is detected in provided parsed log then indicate that there is a testscript defect and also mention the reason for this defect otherwise indicate that there is not testscript defect"
+    ),
+    model_client=ollama_client,
+)
+
+# Agent 3: Summarize
+SummaryAgent = AssistantAgent(
+    name="SummaryAgent",
+    system_message=(
+        "You are a summarizer. Combine parsed log data and defect classification "
+        "into a concise, readable report for the user."
+    ),
+    model_client=ollama_client,
+
+)
+# Step 1: Parse log
+
+# Step 2: Prepare message
+
+# Define async coroutines for each agent
+async def client_task(message):
+    try:
+        print("[Thread] Client agent running")
+        classify_message = MultiModalMessage(content=[f"Classify this defect:\n{message}"], source="User")
+
+        return await ClientDefectClassifierAgent.on_messages([classify_message], cancellation_token=CancellationToken())
+    except Exception as e:
+        print("[ClientTask] Error:", e)
+        traceback.print_exc()
+        return None
+
+async def cluster_task(message):
+    try:
+        print("[Thread] Cluster agent running")
+        classify_message = MultiModalMessage(content=[f"Classify this defect:\n{message}"], source="User")
+
+        return await ClusterDefectClassifierAgent.on_messages([classify_message], cancellation_token=CancellationToken())
+    except Exception as e:
+        print("[ClusterTask] Error:", e)
+        traceback.print_exc()
+        return None
+    
+async def testscript_task(message):
+    try:
+        print("[Thread] Testscript agent running")
+        classify_message = MultiModalMessage(content=[f"Classify this defect:\n{message}"], source="User")
+
+        return await TestScriptDefectClassifierAgent.on_messages([classify_message], cancellation_token=CancellationToken())
+    except Exception as e:
+        print("[TestScriptTask] Error:", e)
+        traceback.print_exc()
+        return None
+
+async def parsedata(log_text):
+    parse_message = MultiModalMessage(content=[f"Parse this ONTAP log:\n{log_text}"], source="User")
+    parsed_response = await LogParserAgent.on_messages([parse_message], cancellation_token=CancellationToken())
+    parsed_text = parsed_response.chat_message.content
+    print("\n--- Parsed Log ---\n", parsed_text)
+    return parsed_text
+
+
+import asyncio
+
+
+# with ThreadPoolExecutor(max_workers=3) as executor:
+# # Submit each async task to be run in a separate thread
+#     partial_func = functools.partial(run_async_in_thread, client_task, message)
+#     partial_func1 = functools.partial(run_async_in_thread, cluster_task, message)
+#     partial_func2 = functools.partial(run_async_in_thread, testscript_task, message)
+
+#     futures = [
+#         executor.submit(partial_func),
+#         executor.submit(partial_func1),
+#         executor.submit(partial_func2)
+#     ]
+#     results = [f.result() for f in futures]
+
+# # Step 4: Collect results
+# client_result=results[0]
+# cluster_result=results[1]
+# testscript_result = results[2]
+# client_text = client_result.chat_message.content
+# cluster_text = cluster_result.chat_message.content
+# testscript_text = testscript_result.chat_message.content
+# print("\n--- Classification Results ---")
+# print("Client:", client_text)
+# print("Cluster:", cluster_text)
+# print("Test Script:", testscript_text)
+
+
+
+async def main():
+    parsed_text = await parsedata(ontap_log)
+    partial_func = functools.partial(client_task, parsed_text)
+    partial_func1 = functools.partial(cluster_task, parsed_text)
+    partial_func2 = functools.partial(testscript_task, parsed_text)
+
+
+    client_result, cluster_result, testscript_result = await asyncio.gather(
+        # client_task(parsed_text),
+        # cluster_task(parsed_text),
+        # testscript_task(parsed_text)
+        partial_func(),
+        partial_func1(),
+        partial_func2()
+    )
+
+    client_text = client_result.chat_message.content
+    cluster_text = cluster_result.chat_message.content
+    testscript_text = testscript_result.chat_message.content
+
+    print("Client:", client_text)
+    print("Cluster:", cluster_text)
+    print("Test Script:", testscript_text)
+    summary_input = (
+        f"Summarize this:\n"
+        f"Parsed Info: {parsed_text}\n"
+        f"Client Defect: {client_text}\n"
+        f"Cluster Config Defect: {cluster_text}\n"
+        f"Test Script Defect: {testscript_text}"
+    )
+    summary_message = MultiModalMessage(content=[summary_input], source="User")
+    summary_response = await SummaryAgent.on_messages([summary_message], cancellation_token=CancellationToken())
+
+    print("\n--- Final Summary ---\n", summary_response.chat_message.content)
+
+
+asyncio.run(main())
+
