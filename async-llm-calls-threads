@@ -26,57 +26,13 @@ import os
 load_dotenv(override=True)
 
 
-# os.environ["SERPER_API_KEY"]= os.getenv("SERPER_API_KEY")
-# serper = GoogleSerperAPIWrapper()
-# langchain_serper =Tool(name="internet_search", func=serper.run, description="useful for when you need to search the internet")
-# autogen_serper = LangChainToolAdapter(langchain_serper)
-# prompt = """Find a one-way non-stop flight from Bangalore to Mumbai in November 2025."""
-
-
 ollama_client = OllamaChatCompletionClient(
         model="llama3.2",  # Specify the model you pulled with Ollama
 )
 
 
-    # Example usage
-    # Run the async function (e.g., in an async context or with asyncio.run())
-
-# Agent 1: Parse ONTAP logs
-
-
-# User proxy
 user = UserProxyAgent(name="User")
 
-# --------------------------
-# Message Passing Workflow
-# --------------------------
-# async def process_log(log_text):
-#     # Step 1: LogParserAgent parses
-#     multi_modal_message = MultiModalMessage(content=[f"Parse this ONTAP log:\n{log_text}"], source="User")
-#     response = await LogParserAgent.on_messages([multi_modal_message], cancellation_token=CancellationToken())
-#     reply = response.chat_message.content
-
-#     print(reply)  # type: ignore
-#     multi_modal_message = MultiModalMessage(content=[f"Classify this defect:\n{reply}"], source="User")
-
-#     # Step 2: DefectClassifierAgent classifies
-#     classified = await ClientDefectClassifierAgent.on_messages([multi_modal_message], cancellation_token=CancellationToken())
-#     resultr = classified.chat_message.content
-
-#     classified1 = await ClusterDefectClassifierAgent.on_messages([multi_modal_message], cancellation_token=CancellationToken())
-#     resultr1 = classified1.chat_message.content
-
-#     classified2 = await TestScriptDefectClassifierAgent.on_messages([multi_modal_message], cancellation_token=CancellationToken())
-#     resultr2 = classified2.chat_message.content
-
-
-#     # # Step 3: SummaryAgent summarizes
-#     multi_modal_message = MultiModalMessage(content=[f"Summarize this:\nParsed Info: {reply}\nClassification: {resultr + ' ' + resultr1 + ' '+ resultr2}"], source="User")
-
-#     summarized = await SummaryAgent.on_messages([multi_modal_message], cancellation_token=CancellationToken())
-#     info = summarized.chat_message.content
-
-#     print(info)
 import asyncio
 import threading
 import traceback
@@ -295,4 +251,62 @@ async def main():
 
 
 asyncio.run(main())
+
+
+#---------------------------Thread -optimization------------------------------------
+
+
+
+# import asyncio
+# from concurrent.futures import ThreadPoolExecutor
+# import time
+# import threading
+
+# async def async_task_1():
+#     """An example asynchronous task."""
+#     print(f"Task 1 started in thread: {threading.current_thread().name}")
+#     await asyncio.sleep(2)  # Simulate I/O-bound operation
+#     print(f"Task 1 finished in thread: {threading.current_thread().name}")
+#     return "Result from Task 1"
+
+# async def async_task_2():
+#     """Another example asynchronous task."""
+#     print(f"Task 2 started in thread: {threading.current_thread().name}")
+#     await asyncio.sleep(1)  # Simulate I/O-bound operation
+#     print(f"Task 2 finished in thread: {threading.current_thread().name}")
+#     return "Result from Task 2"
+
+# async def async_task_3():
+#     """A third example asynchronous task."""
+#     print(f"Task 3 started in thread: {threading.current_thread().name}")
+#     await asyncio.sleep(3)  # Simulate I/O-bound operation
+#     print(f"Task 3 finished in thread: {threading.current_thread().name}")
+#     return "Result from Task 3"
+
+# def run_async_in_thread(coroutine_func):
+#     """
+#     Runs an asyncio coroutine in a new event loop within a separate thread.
+#     """
+#     loop = asyncio.new_event_loop()
+#     asyncio.set_event_loop(loop)
+#     try:
+#         result = loop.run_until_complete(coroutine_func())
+#         return result
+#     finally:
+#         loop.close()
+
+# def main():
+#     with ThreadPoolExecutor(max_workers=3) as executor:
+#         # Submit each async task to be run in a separate thread
+#         future1 = executor.submit(run_async_in_thread, async_task_1)
+#         future2 = executor.submit(run_async_in_thread, async_task_2)
+#         future3 = executor.submit(run_async_in_thread, async_task_3)
+
+#         # Retrieve results from the futures
+#         results = [future1.result(), future2.result(), future3.result()]
+#         print("\nAll tasks completed. Results:", results)
+
+# if __name__ == "__main__":
+#     main()
+
 
