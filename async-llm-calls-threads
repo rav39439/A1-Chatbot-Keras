@@ -310,3 +310,143 @@ asyncio.run(main())
 #     main()
 
 
+#-----------------------------------multiple-threads-implementations-------------------------
+
+import threading
+import traceback
+from autogen_agentchat.agents import AssistantAgent
+from autogen_ext.models.ollama import OllamaChatCompletionClient
+from autogen_agentchat.messages import TextMessage, MultiModalMessage
+from autogen_core import CancellationToken
+# ===========================
+# 1. Ollama Client
+# ===========================
+ollama_client = OllamaChatCompletionClient(model="llama3.2")
+ollama_client1 = OllamaChatCompletionClient(model="llama3.2:1b")
+ollama_client2 = OllamaChatCompletionClient(model="mxbai-embed-large:latest")
+
+import asyncio
+
+# ===========================
+# 2. Agents
+# ===========================
+ClientDefectClassifierAgent = AssistantAgent(
+    name="ClientDefectClassifierAgent",
+    system_message=(
+        "You are a defect classifier. Check for client-side issues."
+    ),
+    model_client=ollama_client,
+)
+
+ClusterDefectClassifierAgent = AssistantAgent(
+    name="ClusterDefectClassifierAgent",
+    system_message=(
+        "You are a defect classifier for cluster configuration issues."
+    ),
+    model_client=ollama_client2,
+)
+
+TestScriptDefectClassifierAgent = AssistantAgent(
+    name="TestScriptDefectClassifierAgent",
+    system_message=(
+        "You are a defect classifier for test-script issues."
+    ),
+    model_client=ollama_client1,
+)
+
+# The sample ONTAP log you want to analyze
+ontap_log = """The log shows that a test session for an ONTAP cluster failed because two test scripts were missing required input parameters. The first test case, aggregate_resize_validation, aborted immediately due to a missing mandatory field (target_aggregate), causing dependent subtests to be skipped. The second test, qtree_clone_validation, also failed due to a missing source_qtree parameter, resulting in a configuration-error defect. Both failures were logged as test-script defects, and the session summary reports 0 passed, 2 failed, and 1 skipped before the session completed and the log was saved."""
+
+
+# ===========================
+# 3. Worker function for each thread
+# ===========================
+
+def run_agent(agent, log_text, results, key):
+    try:
+        print(f"[START] Agent {agent.name} is running...")
+
+        async def async_call():
+            multi_modal_message = MultiModalMessage(
+                content=[f"Parse this ONTAP log:\n{log_text}"],
+                source="User"
+            )
+
+            # STREAMING CALL
+            gen = agent.on_messages_stream(
+                [multi_modal_message],
+                cancellation_token=CancellationToken()
+            )
+
+            collected = ""
+            async for msg in gen:
+                if msg.chat_message and msg.chat_message.content:
+                    collected += msg.chat_message.content
+
+            # IMPORTANT: cleanly close generator
+            await gen.aclose()
+
+            return collected
+
+        # Create event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        reply = loop.run_until_complete(async_call())
+
+        # Allow HTTPX / AnyIO cleanup to run
+        loop.run_until_complete(asyncio.sleep(0))
+        loop.run_until_complete(loop.shutdown_asyncgens())
+
+        loop.close()
+
+        results[key] = reply
+        print(f"[DONE] Agent {agent.name} completed.")
+
+    except Exception:
+        # results[key] = traceback.format_exc()
+        print(f"[ERROR] Agent {agent.name} failed.")
+
+
+
+
+# ===========================
+# 4. Main function to run 3 threads in parallel
+# ===========================
+def run_all_agents():
+    threads = []
+    results = {}
+
+    agents = {
+        "client_defect": ClientDefectClassifierAgent,
+        "cluster_defect": ClusterDefectClassifierAgent,
+        "testscript_defect": TestScriptDefectClassifierAgent,
+    }
+
+    # Create and start separate threads
+    for key, agent in agents.items():
+        t = threading.Thread(target=run_agent, args=(agent, ontap_log, results, key))
+        t.start()
+        threads.append(t)
+
+    # Controller function waits until all agent threads finish
+    print("\n[CONTROLLER] Waiting for all agent threads to finish...\n")
+    for t in threads:
+        t.join()
+
+    print("\n[CONTROLLER] All threads finished!\n")
+    return results
+
+
+# ===========================
+# 5. Execute
+# ===========================
+if __name__ == "__main__":
+    final_results = run_all_agents()
+
+    print("\n==============================")
+    print("FINAL RESULTS")
+    print("==============================")
+    for k, v in final_results.items():
+        print(f"\n---- {k} ----")
+        print(v)
