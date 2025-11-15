@@ -1,3 +1,135 @@
+#---------------triton flash attention-------------------------
+
+
+@triton.jit
+def attention_tile_kernel(
+    Q_ptr, K_ptr, V_ptr,
+    out_ptr,
+    N, D, num_tiles,
+    TILE_N: tl.constexpr, TILE_D: tl.constexpr, CHUNK_D: tl.constexpr
+):
+    pid_bh = tl.program_id(0)  # batch*head
+    pid_tq = tl.program_id(1)  # tile along sequence N
+
+    # -------------------------------
+    # Compute row indices for this tile
+    # -------------------------------
+    start_q = pid_tq * TILE_N
+    rn = start_q + tl.arange(0, TILE_N)[:, None]  # (TILE_N,1)
+    cd = tl.arange(0, TILE_D)[None, :]            # (1, TILE_D)
+    q_mask = (rn < N) & (cd < D)
+
+    # -------------------------------
+    # Step 1 & 2: Load Q/K tiles and compute Q@Kᵀ
+    # -------------------------------
+    acc = tl.zeros((TILE_N, TILE_N), dtype=tl.float32)
+
+    for d_off in range(0, TILE_D, CHUNK_D):
+        cd_sub = d_off + tl.arange(0, CHUNK_D)[None, :]
+        mask_sub = (rn < N) & (cd_sub < D)
+
+        q_sub = tl.load(Q_ptr + pid_bh * N * D + rn * D + cd_sub, mask=mask_sub, other=0.0).to(tl.float16)
+        k_sub = tl.load(K_ptr + pid_bh * N * D + rn * D + cd_sub, mask=mask_sub, other=0.0).to(tl.float16)
+
+        q_f32 = q_sub.to(tl.float32)
+        k_f32 = k_sub.to(tl.float32)
+
+        partial = tl.sum(q_f32[:, None, :] * k_f32[None, :, :], axis=2)
+        acc += partial
+
+    # -------------------------------
+    # Step 3: Online row-wise softmax
+    # -------------------------------
+    row_max = tl.max(acc, axis=1)
+    exp_tile = tl.exp(acc - row_max[:, None])
+    row_sum = tl.sum(exp_tile, axis=1)
+    softmax_tile = exp_tile / row_sum[:, None]  # shape (TILE_N, TILE_N)
+
+    # -------------------------------
+    # Step 4: Multiply with V
+    # -------------------------------
+    # accumulator for output tile
+    out_tile = tl.zeros((TILE_N, TILE_D), dtype=tl.float32)
+
+    for d_off in range(0, D, CHUNK_D):
+        cd_sub = d_off + tl.arange(0, CHUNK_D)[None, :]
+        mask_sub = (rn < N) & (cd_sub < D)
+
+        v_sub = tl.load(V_ptr + pid_bh * N * D + rn * D + cd_sub, mask=mask_sub, other=0.0).to(tl.float16)
+        v_f32 = v_sub.to(tl.float32)  # (TILE_N, CHUNK_D)
+
+        # Multiply softmax_tile (TILE_N × TILE_N) with V_chunk (TILE_N × CHUNK_D)
+        # Result: TILE_N × CHUNK_D
+        out_tile += tl.dot(softmax_tile, v_f32)  # Triton supports dot on small tiles
+
+    # -------------------------------
+    # Store final output tile
+    # -------------------------------
+    out_idx = pid_bh * num_tiles * TILE_N * D \
+            + pid_tq * TILE_N * D \
+            + rn * D + cd  # linear offsets
+    mask_out = (rn < N) & (cd < D)
+    tl.store(out_ptr + out_idx, out_tile, mask=mask_out)
+
+# -------------------------
+if __name__ == "__main__":
+    B, H, N, D = 1, 6, 1024, 64
+    device = "cuda"
+    BH = B * H
+
+    # Create random FP16 inputs to encourage tensor-core usage (we'll cast inside the kernel anyway)
+    Q = torch.randn(BH, N, D, device=device, dtype=torch.float16)
+    K = torch.randn(BH, N, D, device=device, dtype=torch.float16)
+    V = torch.randn(BH, N, D, device=device, dtype=torch.float16)
+
+    num_tiles = math.ceil(N / TILE_N)
+
+    # Output scores: store per (bh, t_q, t_k, TILE_N, TILE_N)
+    # This can be large: BH * num_tiles * num_tiles * 64 * 64 if you store for all t_k.
+    # For demo we'll store per (bh, t_q) vs same t_k (i.e., only diagonal) to keep size reasonable:
+    out_shape = (BH, num_tiles, TILE_N, TILE_N)
+    out_scores = torch.zeros(out_shape, device=device, dtype=torch.float32)
+
+    # Grid chooses (bh, t_q)
+    grid = (BH, num_tiles)
+
+    # IMPORTANT: the simplified kernel above loads K from the same rows as Q (for a demo).
+    # In a true attention implementation you'd either:
+    #  - Launch an outer loop over t_k and pass K_ptr offset per launch, or
+    #  - Add program_id(2) to index t_k as another grid dim and loop inside
+    #
+    # For demonstration, we will compute q_tile @ k_tile.T where k_tile is the same tile (t_q),
+    # i.e., diagonal tile product. To compute all pairs, you'd need to add another loop/launch.
+    qk_tile_gemm_softmax_kernel[grid](
+        Q, K,
+        out_scores,
+        N, D, num_tiles,
+        TILE_N=TILE_N, TILE_D=TILE_D, CHUNK_D=CHUNK_D
+    )
+
+    print("out_scores shape:", out_scores.shape)
+    # show a small block
+    print("example block [0,0]:")
+    print(out_scores[0, 0, :4, :4])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 import numpy as np
 import matplotlib.pyplot as plt
