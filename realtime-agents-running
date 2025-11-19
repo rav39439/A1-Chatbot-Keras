@@ -274,3 +274,140 @@ def predict_best_action(state):
 # Example prediction
 example_state = ('home_page', 'new_user', 'morning')
 print(f"Best action for {example_state}: {predict_best_action(example_state)}")
+
+
+
+/////////////////////////////actor -crttic//////////////////////
+
+
+Absolutely! Let’s write a simplified Python simulation of Actor-Critic for a content recommendation scenario using PyTorch. This will illustrate how the Actor chooses actions, the Critic evaluates, and both get updated.
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import random
+
+# --------- Setup: States, Actions, Rewards ----------
+user_states = ['morning_user', 'afternoon_user', 'evening_user']
+shows = ['Show_A', 'Show_B', 'Show_C']  # actions
+num_states = len(user_states)
+num_actions = len(shows)
+
+# Reward probabilities for demo purposes
+reward_probs = {
+    'morning_user': [0.5, 0.3, 0.2],
+    'afternoon_user': [0.2, 0.5, 0.3],
+    'evening_user': [0.1, 0.3, 0.6]
+}
+
+# One-hot encoding for states
+def state_to_tensor(state):
+    vec = torch.zeros(num_states)
+    vec[user_states.index(state)] = 1.0
+    return vec
+
+# --------- Actor Network: outputs action probabilities ----------
+class Actor(nn.Module):
+    def __init__(self, input_size, output_size):
+        super(Actor, self).__init__()
+        self.fc = nn.Linear(input_size, output_size)
+        self.softmax = nn.Softmax(dim=-1)
+    
+    def forward(self, x):
+        return self.softmax(self.fc(x))
+
+# --------- Critic Network: outputs state value ----------
+class Critic(nn.Module):
+    def __init__(self, input_size):
+        super(Critic, self).__init__()
+        self.fc = nn.Linear(input_size, 1)
+    
+    def forward(self, x):
+        return self.fc(x)
+
+# Initialize networks and optimizers
+actor = Actor(num_states, num_actions)
+critic = Critic(num_states)
+
+actor_optimizer = optim.Adam(actor.parameters(), lr=0.01)
+critic_optimizer = optim.Adam(critic.parameters(), lr=0.01)
+
+# Hyperparameters
+gamma = 0.9
+episodes = 1000
+
+# --------- Training Loop ----------
+for _ in range(episodes):
+    state = random.choice(user_states)
+    state_tensor = state_to_tensor(state)
+
+    # Actor chooses action
+    action_probs = actor(state_tensor)
+    action_dist = torch.distributions.Categorical(action_probs)
+    action_idx = action_dist.sample()
+    action = shows[action_idx]
+
+    # Environment gives reward
+    reward = 1 if random.random() < reward_probs[state][action_idx] else 0
+
+    # Critic estimates value
+    value = critic(state_tensor)
+    
+    # Next state (for simplicity, random user state)
+    next_state = random.choice(user_states)
+    next_state_tensor = state_to_tensor(next_state)
+    next_value = critic(next_state_tensor).detach()
+
+    # Compute advantage
+    target = reward + gamma * next_value
+    advantage = target - value
+
+    # --------- Update Critic ----------
+    critic_loss = advantage.pow(2)  # MSE
+    critic_optimizer.zero_grad()
+    critic_loss.backward()
+    critic_optimizer.step()
+
+    # --------- Update Actor ----------
+    actor_loss = -action_dist.log_prob(action_idx) * advantage.detach()
+    actor_optimizer.zero_grad()
+    actor_loss.backward()
+    actor_optimizer.step()
+
+# --------- Test: Predict best show for a state ----------
+def recommend_show(state):
+    with torch.no_grad():
+        probs = actor(state_to_tensor(state))
+    best_idx = torch.argmax(probs).item()
+    return shows[best_idx]
+
+# Example
+test_state = 'morning_user'
+print(f"Recommended show for {test_state}: {recommend_show(test_state)}")
+
+
+Explanation
+
+
+Actor outputs probabilities for each show given the user state.
+
+
+Critic estimates how good the current state is.
+
+
+Reward is sampled based on the predefined probabilities (reward_probs).
+
+
+Advantage is calculated: advantage = (reward + gamma * next_value) - current_value.
+
+
+Actor update: Increases probability of actions that gave positive advantage.
+
+
+Critic update: Trains to predict state values accurately.
+
+
+After training, the Actor learns to recommend shows based on the state of the user.
+
+If you want, I can also visualize the probability distribution of recommended shows per user state to show how the Actor adapts over time. This is useful for understanding the learning process.
+Do you want me to add that visualization?
