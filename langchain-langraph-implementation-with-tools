@@ -1,0 +1,885 @@
+
+
+
+
+from typing import Annotated
+from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from dotenv import load_dotenv
+from IPython.display import Image, display
+import gradio as gr
+from langgraph.prebuilt import ToolNode, tools_condition
+# from langchain.agents import Tool
+from langchain_core.tools import tool
+
+from typing import Annotated, TypedDict, List, Dict, Any, Optional
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+# from langchain_openai import ChatOpenAI
+# from langgraph.checkpoint.memory import MemorySaver
+from langchain_ollama import ChatOllama
+
+# from llmmodel import OllamaClassifier
+from functools import lru_cache
+import time
+
+# # Create or reuse the singleton
+# classifier_llm = OllamaClassifier()
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+
+# from langchain.globals import set_llm_cache
+# from langchain_core.caches import InMemoryCache
+
+# # Option 1: In-memory cache (cleared when environment restarts)
+# set_llm_cache(InMemoryCache())
+
+class WorkflowState(TypedDict):
+    user_input: str
+    defectdescription:Optional[Dict[str, Any]]
+    defect_type: Optional[str]
+    classification_reason: Optional[str]
+    tool_output: Optional[str]
+    final_output: Optional[str]
+    definitions:Optional[str]
+
+
+# =========================================================
+# 2. Define Base LLMs
+# =========================================================
+classifier_llm = ChatOllama(model="llama3.2", temperature=0.1)
+
+parser_llm = ChatOllama(model="gemma3:1b", temperature=0.1)
+
+
+@lru_cache(maxsize=1)
+def get_prompt_message():
+    """
+    Returns a static system message dict for ONTAP log parsing.
+    """
+    return {
+        "role": "system",
+        "content": (
+           "You are an expert in analyzing NetApp ONTAP NATE test framework and Perl stack logs. "
+        "Your task is to extract and summarize key diagnostic information from NATE or Perl stack traces. "
+        "Focus on capturing the following fields when present: "
+        "• error_message (text following FAIL, ERROR, or WARNING) "
+        "• error_code or return_code (numeric or symbolic if available) "
+        "• root_cause (concise description inferred from the message or function) "
+        "• status (e.g., FAILED, ABORTED, TIMEOUT, WARNING) "
+        "• event_or_module (such as EventMan::EventModules::ControllerEvents::CMode::SFOEvents) "
+        "• timeout_value (if mentioned in seconds) "
+        "• command_or_function (e.g., detect_sfo_giveback, sfo_giveback_generic) "
+        "• subtest_or_runid (values after -runid, Subtest::new, or Tharn::subtest) "
+        "• file_path_and_line (the Perl module path and line number) "
+        "If any field is missing, omit it gracefully. "
+        "Summarize the extracted information in a single, clear paragraph written in natural language, "
+        "stating what happened, in which module, and the probable defect type if inferable "
+        "(e.g., timeout, system failure, or test harness issue)."
+        )
+    }
+
+
+def parse_ontap_log(state: WorkflowState) -> WorkflowState:
+    print("started")
+    prompt = get_prompt_message()
+
+    response = parser_llm.invoke([
+        prompt,
+        {"role": "user", "content": state["user_input"]}
+    ])
+    print('completed')
+    print(response.content)
+    state["defectdescription"] = response.content
+    return state
+
+
+# =========================================================
+# 3. Define Tools
+# =========================================================
+def client_agent(state: WorkflowState) -> WorkflowState:
+    summary_prompt = f"""
+    Analyze the following ONTAP test-script defect and summarize.
+
+    Task:
+    1. Identify the test-script defect type (syntax error, parser bug, crash, invalid parameter, etc.).
+    2. Explain the cause clearly and in breif.
+
+    If any of these fields are missing, skip them.
+    Summarize all extracted information into a clear, single paragraph
+    Take the context as user_input
+    """
+    
+    result = classifier_llm.invoke([
+    {"role": "system", "content": summary_prompt},
+    {
+        "role": "user",
+        "content": state.get("defectdescription", "No detailed defect description available.") + 
+                   " " + state.get("classification_reason", "")
+    }
+    ])
+    state["final_output"] = result.content.strip()
+    print("completed2")
+    return state
+    
+def test_script_agent(state: WorkflowState) -> WorkflowState:
+    summary_prompt = f"""
+    Analyze the following ONTAP test-script defect and summarize.
+
+    Task:
+    1. Identify the test-script defect type (syntax error, parser bug, crash, invalid parameter, etc.).
+    2. Explain the cause clearly and in breif.
+
+    If any of these fields are missing, skip them.
+    Summarize all extracted information into a clear, single paragraph
+    Take the context as user_input
+    """
+
+    result = classifier_llm.invoke([
+    {"role": "system", "content": summary_prompt},
+    {
+        "role": "user",
+        "content": state.get("defectdescription", "No detailed defect description available.") + 
+                   " " + state.get("classification_reason", "")
+    }
+    ])
+    state["final_output"] = result.content.strip()
+    return state
+
+def jira_agent(state: WorkflowState) -> WorkflowState:
+    summary_prompt = f"""
+    Analyze the following ONTAP jira defect and summarize.
+
+    Task:
+    1. Identify the jira-defect type (syntax error, parser bug, crash, invalid parameter, etc.).
+    2. Explain the cause clearly and in breif.
+
+    If any of these fields are missing, skip them.
+    Summarize all extracted information into a clear, single paragraph
+    Take the context as user_input
+    """
+
+    result = classifier_llm.invoke([
+    {"role": "system", "content": summary_prompt},
+    {
+        "role": "user",
+        "content": state.get("defectdescription", "No detailed defect description available.") + 
+                   " " + state.get("classification_reason", "")
+    }
+    ])
+    state["final_output"] = result.content.strip()
+    return state
+
+def system_agent(state: WorkflowState) -> WorkflowState:
+    summary_prompt = f"""
+    Analyze the following ONTAP system defect and summarize.
+
+    Task:
+    1. Identify the system defect type.
+    2. Explain the cause clearly and in breif.
+
+    If any of these fields are missing, skip them.
+    Summarize all extracted information into a clear, single paragraph
+    Take the context as user_input
+    """
+
+    result = classifier_llm.invoke([
+    {"role": "system", "content": summary_prompt},
+    {
+        "role": "user",
+        "content": state.get("defectdescription", "No detailed defect description available.") + 
+                   " " + state.get("classification_reason", "")
+    }
+    ])
+    state["final_output"] = result.content.strip()
+    return state
+
+
+def cli_agent(state: WorkflowState) -> WorkflowState:
+    summary_prompt = f"""
+    Analyze the following ONTAP CLI defect and summarize.
+
+    Task:
+    1. Identify the CLI defect type.
+    2. Explain the cause clearly and in breif.
+
+    If any of these fields are missing, skip them.
+    Summarize all extracted information into a clear, single paragraph
+    Take the context as user_input
+    """
+
+    result = classifier_llm.invoke([
+    {"role": "system", "content": summary_prompt},
+    {
+        "role": "user",
+        "content": state.get("defectdescription", "No detailed defect description available.") + 
+                   " " + state.get("classification_reason", "")
+    }
+    ])
+    state["final_output"] = result.content.strip()
+    return state
+
+def cluster_config_agent(state: WorkflowState) -> WorkflowState:
+    summary_prompt = f"""
+    Analyze the following ONTAP cluster-config defect and summarize.
+
+    Task:
+    1. Identify the cluster-config defect type.
+    2. Explain the cause clearly and in breif.
+
+    If any of these fields are missing, skip them.
+    Summarize all extracted information into a clear, single paragraph
+    Take the context as user_input
+    """
+
+    result = classifier_llm.invoke([
+    {"role": "system", "content": summary_prompt},
+    {
+        "role": "user",
+        "content": state.get("defectdescription", "No detailed defect description available.") + 
+                   " " + state.get("classification_reason", "")
+    }
+    ])
+
+    state["final_output"] = result.content.strip()
+    return state
+
+
+
+def log_parser_agent(state: WorkflowState) -> WorkflowState:
+   
+    summary_prompt = f"""
+    Summarize the following tool output for a user-friendly response:
+    {state["defect_type"]}
+    """
+    result = classifier_llm.invoke(summary_prompt)
+    state["final_output"] = result.content
+    return state
+
+
+# Tool mapping
+TOOL_MAP = {
+    "client-side defect": client_agent,
+    "test-script defect": test_script_agent,
+    "jira defect": jira_agent,
+    "system defect": system_agent,
+    "cli defect": cli_agent,
+    "log parser defect": log_parser_agent,
+    "cluster-config defect": cluster_config_agent,
+
+}
+
+# =========================================================
+# 4. Define Workflow Nodes
+# =========================================================
+
+# --- Node 1: Classification Agent ---
+
+@lru_cache(maxsize=1)
+def get_static_system_prompt() -> str:
+    """
+    Returns the static part of the system prompt. Cached to avoid recomputation.
+    """
+    return """
+You are an expert ONTAP defect classifier. Please refer to the definitions of the defects below ;
+
+Classify the summarized ONTAP defect log provided below into one of these types:
+- cli defect: A defect in the ONTAP Command Line Interface layer involving command syntax, argument parsing, help text inaccuracies, or output formatting issues—typically confined to the CLI frontend (mgmt-cli) and not backend functionality, e.g., parser rejection, incorrect error messaging, or CLI/REST inconsistency.
+- client-side defect: A failure in client tools, SDKs, or REST/API code interacting with ONTAP (e.g., Python traceback, JSON parsing error, HTTP issue, or REST mismatch) caused by schema or version incompatibility, serialization/connection bugs, or logic errors in external automation where ONTAP’s responses are valid.
+- jira defect: A problem in defect tracking, reporting, or CI/CD automation (not ONTAP itself), such as failed ticket creation, incorrect metadata mapping, workflow transition errors, or authentication issues between systems like Jenkins and JIRA during defect reporting or synchronization.
+- system defect: A genuine ONTAP software failure in its core subsystems (WAFL, HA, NVRAM, storage, replication, or networking) manifesting as a panic, node crash, failover fault, or service malfunction—requiring an ONTAP code fix rather than test or client changes.
+- log parser defect: An error in log analysis or parser tools where ONTAP logs are correct but parsing logic misinterprets, skips, or truncates data (e.g., regex mismatch, field rename, or multi-line error handling issue), leading to incorrect or incomplete defect summaries.
+- test-script defect: A failure caused by the test automation, validation logic, or framework itself—not ONTAP. This includes logic errors, incorrect validations, timing issues, or environment assumptions. ONTAP behaves correctly, but the test fails due to faulty test code or setup. Fixing the test script or automation resolves it.
+- cluster-config defect: A failure caused by incorrect, inconsistent, or incomplete ONTAP cluster configuration—not test code. This includes misconfigured nodes, quorum, interconnects, HA pairs, MetroCluster links, replication, or version mismatches. The test code is correct, but expected cluster behavior fails. Resolution requires correcting the cluster setup or re-initializing the environment.
+ also use your understanding of these defect types.
+
+Respond only in JSON format:
+{"defect_type": "...", "reason": "..."}
+"""
+
+def classify_node(state: WorkflowState) -> WorkflowState:
+    system_prompt = get_static_system_prompt()
+
+
+    result = classifier_llm.invoke([
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": state["defectdescription"]}
+    ])
+
+    print("completed1")
+
+    import json
+    try:
+        data = json.loads(result.content)
+    except Exception:
+        data = {"defect_type": "unknown", "reason": "Parse error"}
+
+    state["defect_type"] = data["defect_type"]
+    state["classification_reason"] = data["reason"]
+    return state
+
+
+# --- Node 2: Tool Execution Node ---
+def tool_node(state: WorkflowState) -> WorkflowState:
+    defect_type = state.get("defect_type", "")
+    tool_func = TOOL_MAP.get(defect_type)
+
+    if tool_func:
+        output = tool_func(state)
+    else:
+        output = f"No suitable tool found for defect type: '{defect_type}'."
+    state["tool_output"] = output
+    return state
+
+import re
+from collections import defaultdict
+
+def extract_perl_log_info(log_text):
+    """
+    Extracts key information from Perl log text for defect prediction.
+    Input: log_text as a single string (entire log)
+    Output: dictionary with extracted info
+    """
+    patterns = {
+       # Timestamp (8 digits date + 6 digits time)
+        "timestamp": re.compile(r"\b\d{8}\s\d{6}\b", re.IGNORECASE),
+
+        # Log level keywords (case-insensitive)
+        "log_level": re.compile(r"\b(FAIL|ERROR|WARN|WARNING|INFO|DEBUG)\b", re.IGNORECASE),
+
+        # Function name (Perl package-style)
+        "function": re.compile(r"([A-Za-z0-9_:]+::[A-Za-z0-9_:]+)", re.IGNORECASE),
+
+        # Module file (.pm paths)
+        "module": re.compile(r"(/[\w/.\-]+\.pm)", re.IGNORECASE),
+
+        # Line number (standard Perl trace format)
+        "line_number": re.compile(r"line\s+(\d+)", re.IGNORECASE),
+
+        # Timeout values (digits up to 5 chars)
+        "timeout": re.compile(r"\b(\d{2,5})\b", re.IGNORECASE),
+
+        # ✅ Case-insensitive TESTCASE pattern
+        "testcase": re.compile(r"test\s*case\s*[:=]\s*([\w\-]+)|testcase\s*[:=]\s*([\w\-]+)", re.IGNORECASE),
+
+        # Failure summary — capture reason after “Failed due to …”
+        "failure_summary": re.compile(r"Failed\s+due\s+to\s+(.+?)(?:$|\.|\n)", re.IGNORECASE),
+    }
+
+    log_summary = defaultdict(list)
+
+    for line in log_text.splitlines():
+        line = line.strip()
+        for key, pattern in patterns.items():
+            matches = pattern.findall(line)
+            if matches:
+                # Flatten tuple matches if regex returns tuples
+                matches = [m if isinstance(m, str) else next(filter(None, m)) for m in matches]
+                log_summary[key].extend(matches)
+
+    # Deduplicate
+    for key in log_summary:
+        log_summary[key] = list(set(log_summary[key]))
+
+    return dict(log_summary)
+
+
+# Example usage with your log string
+
+
+graph = StateGraph(WorkflowState)
+# graph.add_node("extract_definitions", extract_definitions_node)
+
+graph.add_node("classify", classify_node)
+graph.add_node("run_tool", tool_node)
+graph.add_node("parse_ontap_log", parse_ontap_log)
+
+# Connect workflow
+# graph.set_entry_point("extract_definitions")
+
+graph.set_entry_point("parse_ontap_log")
+graph.add_edge("parse_ontap_log", "classify")
+
+graph.add_edge("classify", "run_tool")
+graph.add_edge("run_tool", END)
+# graph.add_edge("summarize", END)
+
+# Compile the workflow
+workflow = graph.compile()
+
+
+if __name__ == "__main__":
+    user_query = "Cannot read property 'value' of undefined"
+    log_text="""
+NATE Log ViewerHome  |  Dark Mode  |  Command Parser  |  Help
+Tip: Did you know that you can filter out various information in NATE logs? Click here to set filtering preferences.
+File: /x/eng/ctl_logs_b/res_encrypted_b/87623038_88194352/logs/20251018_040453/02_CM_Cluster_SFO_combined_mcc_serial/EventMan/01_008_nacl_sfo_panicgiveCm_2.log
+Natejob Top Dir >>
+Click [+]/[-] to expand or collapse results bar
+[+]
+1 Test Failures
+[+]
+22 Test Warnings
+  01_008_nacl_sfo_panicgiveCm_2.log
+Select a log file
+Click to get Exapand/Collapse option for REST REQUEST/RESPONSE
+1   20251019 120817 [.]  {STAF_handle=>'4145',name=>'02_CM_Cluster_SFO_combined_mcc_serial/EventMan/01_008_nacl_sfo_panicgiveCm_2(558032)',PID=>'558032', machine=>'scs000871776-6'}
+2   20251019 120818 [.]  !! Begin test.  Script EventMan::__ANON__
+
+
+
+Please report only parsing problems related to this log viewing tool to dl-nate-dev@netapp.com.
+""" 
+    ontp_lg=log_text
+    testlog=extract_perl_log_info(log_text)
+    print(testlog)
+
+    start = time.time()
+    log_lines = log_text.strip().splitlines()
+    if(len(log_lines)>20):
+
+       ontp_lg=extract_perl_log_info(log_text)
+       ontp_lg = "\n".join(f"{k}: {v}" for k, v in ontp_lg.items())
+       
+
+    else:
+        ontp_lg=log_text
+    
+    
+
+    result = workflow.invoke({"user_input": ontp_lg})
+   
+#     # newstate= WorkflowState()
+
+#     # newstate['user_input']=ontp_lg
+
+#     # result=parse_ontap_log(newstate)
+#     # print(result["defectdescription"])
+
+    
+    print("\n==== WORKFLOW EXECUTION RESULT ====")
+    print("Defect Type:", result["defect_type"])
+    print("Classification Reason:", result["classification_reason"])
+    # print("Tool Output:", result["tool_output"])
+    print("Final Output:", result["final_output"])
+    print(f"System prompt encoded in {time.time() - start:.4f}s")
+
+# -------------------------------------------------------------------------------------------------
+
+
+
+# !/usr/bin/env python3
+# !/usr/bin/env python3
+
+
+#-----------------------------------alternative -langgraph-using-tool----------------------------------
+
+
+
+# from typing import Annotated
+# from typing_extensions import TypedDict
+# from langgraph.graph import StateGraph, START, END
+# from langgraph.graph.message import add_messages
+# from dotenv import load_dotenv
+# from IPython.display import Image, display
+# import gradio as gr
+# from langgraph.prebuilt import ToolNode, tools_condition
+# # from langchain.agents import Tool
+# from langchain_core.tools import tool
+
+# from typing import Annotated, TypedDict, List, Dict, Any, Optional
+# from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+# # from langchain_openai import ChatOpenAI
+# # from langgraph.checkpoint.memory import MemorySaver
+# from langchain_ollama import ChatOllama
+
+# # from llmmodel import OllamaClassifier
+# from functools import lru_cache
+# import time
+# from langchain_core.tools import tool
+
+# import json
+# from pydantic import BaseModel, Field
+
+# from prompts import get_test_script_defect_prompt,get_cluster_config_defect_prompt,get_client_side_defect_prompt,get_system_defect_prompt,get_log_parser_defect_prompt,get_jira_defect_prompt,get_cli_defect_prompt,get_prompt_message
+# from langchain_ollama import ChatOllama
+# from langchain_core.tools import tool
+# from langchain_core.messages import HumanMessage, AIMessage,SystemMessage,ToolCall
+# from langgraph.prebuilt import ToolNode, tools_condition
+# from langgraph.graph import StateGraph, START, END
+# from pydantic import BaseModel, Field
+# from typing import List
+# from langgraph.graph.message import add_messages
+# from typing import TypedDict,Annotated
+# import json
+# from langchain.tools import tool
+
+
+# import re
+# from collections import defaultdict
+# def extract_perl_log_info(log_text):
+#     """
+#     Extracts key information from Perl log text for defect prediction.
+#     Input: log_text as a single string (entire log)
+#     Output: dictionary with extracted info
+#     """
+#     patterns = {
+#        # Timestamp (8 digits date + 6 digits time)
+#         "timestamp": re.compile(r"\b\d{8}\s\d{6}\b", re.IGNORECASE),
+
+#         # Log level keywords (case-insensitive)
+#         "log_level": re.compile(r"\b(FAIL|ERROR|WARN|WARNING|INFO|DEBUG)\b", re.IGNORECASE),
+
+#         # Function name (Perl package-style)
+#         "function": re.compile(r"([A-Za-z0-9_:]+::[A-Za-z0-9_:]+)", re.IGNORECASE),
+
+#         # Module file (.pm paths)
+#         "module": re.compile(r"(/[\w/.\-]+\.pm)", re.IGNORECASE),
+
+#         # Line number (standard Perl trace format)
+#         "line_number": re.compile(r"line\s+(\d+)", re.IGNORECASE),
+
+#         # Timeout values (digits up to 5 chars)
+#         "timeout": re.compile(r"\b(\d{2,5})\b", re.IGNORECASE),
+
+#         # ✅ Case-insensitive TESTCASE pattern
+#         "testcase": re.compile(r"test\s*case\s*[:=]\s*([\w\-]+)|testcase\s*[:=]\s*([\w\-]+)", re.IGNORECASE),
+
+#         # Failure summary — capture reason after “Failed due to …”
+#         "failure_summary": re.compile(r"Failed\s+due\s+to\s+(.+?)(?:$|\.|\n)", re.IGNORECASE),
+#     }
+
+#     log_summary = defaultdict(list)
+
+#     for line in log_text.splitlines():
+#         line = line.strip()
+#         for key, pattern in patterns.items():
+#             matches = pattern.findall(line)
+#             if matches:
+#                 # Flatten tuple matches if regex returns tuples
+#                 matches = [m if isinstance(m, str) else next(filter(None, m)) for m in matches]
+#                 log_summary[key].extend(matches)
+
+#     # Deduplicate
+#     for key in log_summary:
+#         log_summary[key] = list(set(log_summary[key]))
+
+#     return dict(log_summary)
+
+
+
+# @tool
+# def analyze_client_side_defect(log_summary: str) -> str:
+#     """
+#     Expert ONTAP client-side defect classifier.
+
+#     A client-side defect refers to any failure occurring in the client automation layer, SDKs, or REST/API interface when interacting with ONTAP, where ONTAP responses are valid but the client misprocesses or mishandles them.
+#     Includes issues such as JSON/XML parsing errors, REST or HTTP request/response timeouts, serialization or deserialization failures, authentication or session handling problems, schema or version mismatches, and logic errors in client automation or SDK code. 
+#     Excludes ONTAP system or cluster errors, test-script logic issues, and infrastructure-level network or hardware failures.
+
+#     The tool summarizes **all client-side defects** in a single report,
+#     including root causes and possible mitigation steps.
+
+#     """
+#     print("------------analyze_client_side_defect invoked--------------------------")
+
+#     return (
+#             f"Defect Type: Client-side\n"
+#             f"Analysis: {log_summary}"
+#         )
+
+
+
+# @tool
+# def analyze_test_script_defect(log_summary: str) -> str:
+#     """
+#     Expert ONTAP test-script defect classifier.
+
+#     Covers all failures originating from the test automation or validation layer where ONTAP behaves correctly but the test logic, setup, or harness is faulty. 
+#     Includes issues like missing or invalid parameters, failed assertions, incorrect validations, environment or dependency misconfiguration, harness or utility malfunctions, race conditions, and timing delays. 
+#     Excludes client-side SDK/API errors, ONTAP cluster or system defects, and external network or hardware failures.
+
+
+#     The tool summarizes **all test_script defects** in a single report,
+#     including root causes and possible mitigation steps.
+
+#     """
+#     print("------------analyze_test-script_side_defect invoked--------------------------")
+
+#     return (
+#             f"Defect Type: test-script-defect\n"
+#             f"Analysis: {log_summary}"
+#         )
+
+
+# @lru_cache(maxsize=1)
+# def get_prompt_message():
+#     """
+#     Returns a static system message dict for ONTAP log parsing.
+#     """
+#     return {
+#         "role": "system",
+#         "content": (
+#            "You are an expert in analyzing NetApp ONTAP NATE test framework and Perl stack logs. "
+#         "Your task is to extract and summarize key diagnostic information from NATE or Perl stack traces. "
+#         "Focus on capturing the following fields when present: "
+#         "• error_message (text following FAIL, ERROR, or WARNING) "
+#         "• error_code or return_code (numeric or symbolic if available) "
+#         "• root_cause (concise description inferred from the message or function) "
+#         "• status (e.g., FAILED, ABORTED, TIMEOUT, WARNING) "
+#         "• event_or_module (such as EventMan::EventModules::ControllerEvents::CMode::SFOEvents) "
+#         "• timeout_value (if mentioned in seconds) "
+#         "• command_or_function (e.g., detect_sfo_giveback, sfo_giveback_generic) "
+#         "• subtest_or_runid (values after -runid, Subtest::new, or Tharn::subtest) "
+#         "• file_path_and_line (the Perl module path and line number) "
+#         "If any field is missing, omit it gracefully. "
+#         "Summarize the extracted information in a single, clear paragraph written in natural language, "
+#         "stating what happened, in which module, and the probable defect type if inferable "
+#         "(e.g., timeout, system failure, or test harness issue)."
+#         )
+#     }
+
+# def ontap_log_parse(log:str) -> str:
+#     print("started")
+#     prompt = get_prompt_message()
+#     last_msg =log
+#     user_message =log
+#     # Invoke LLM properly
+#     response = llm.invoke([
+#         SystemMessage(content=prompt["content"]),
+#         HumanMessage(content=user_message)
+#     ])
+#     return response.content
+    
+
+# @tool
+# def analyze_cluster_config_defect(log_summary: str) -> str:
+#     """
+#     You are an expert ONTAP cluster-configuration defect classifier.
+
+#     A cluster-configuration defect refers to failures within ONTAP’s cluster setup, connectivity, or replication topology caused by misconfigurations or mismatched states across nodes.
+#     Includes issues such as quorum or HA pair failures, interconnect or MetroCluster link problems, version or license incompatibilities, cluster join or node addition errors, replication or failover configuration faults, and misaligned cluster network settings. 
+#     Excludes client-side automation or SDK issues, test-script logic defects, and internal ONTAP system or hardware errors.
+
+#     It summarizes **all cluster configuration defects** in a single paragraph
+#     """
+   
+#     print("------------analyze_cluster_config_defect invoked--------------------------")
+
+#     # Execute only if classification == cluster configuration
+        
+
+#     return (
+#         f"Defect Type: cluster-config-defect \n"
+#         f"Analysis: {log_summary} "
+#     )
+
+
+# class State(TypedDict):
+#     messages: Annotated[list, add_messages]
+# llm = ChatOllama(model="llama3.2")
+# parser_llm = ChatOllama(model="gemma3:1b")
+
+# llm_with_tools = llm.bind_tools([analyze_client_side_defect,analyze_cluster_config_defect,analyze_test_script_defect])
+# tool_node = ToolNode([analyze_client_side_defect,analyze_cluster_config_defect,analyze_test_script_defect])
+# def llm_step(state: State) -> State:
+#     response = llm_with_tools.invoke(state["messages"])
+#     state["messages"].append(response)
+#     return 
+
+# system_prompt_message = """
+# You are an ONTAP defect analysis assistant operating in a restricted tool environment.
+
+# Rules:
+# 1. Use the provided tools to handle user input.
+# 2. Do not reason, summarize, or answer directly.
+# 3. If a tool is applicable, invoke it.
+# 4. If no tool applies, output exactly that no tool is applicable for this log and then use your own knowledge for defect classification.
+# """
+
+# # 6️⃣ Build the graph
+# graph_builder = StateGraph(State)
+# graph_builder.add_node("llm", llm_step)
+# graph_builder.add_node("tools", tool_node)
+# graph_builder.add_conditional_edges( "llm", tools_condition, "tools")
+# graph_builder.add_edge("tools", "llm")
+# graph_builder.add_edge(START, "llm")
+
+
+# # 7️⃣ Compile the graph
+# app = graph_builder.compile()
+# import time
+# # 8️⃣ Initialize and run
+# import asyncio
+# async def main():
+#     user_input = """
+# [2025-11-04 11:20:05] INFO  :: NATE::TestManager -> Starting test session for ONTAP cluster 10.25.44.18
+# [2025-11-04 11:20:05] DEBUG :: Loading configuration from /etc/nate/config/ontap_cluster.conf
+# [2025-11-04 11:20:06] INFO  :: Connecting to ONTAP management LIF 10.25.44.18 via HTTPS (port 443)
+# [2025-11-04 11:20:06] DEBUG :: Using Perl SDK module NaServer.pm
+# [2025-11-04 11:20:07] INFO  :: Preparing test harness for test cases: volume_clone_validation, snapmirror_sync_validation, export_policy_validation
+# [2025-11-04 11:20:07] INFO  :: Starting test case 'export_policy_validation'
+# [2025-11-04 11:20:07] ERROR :: NATE::TestManager -> REST API request failed: timeout after 15 seconds
+# [2025-11-04 11:20:07] DEBUG :: Attempted API call: GET /api/storage/export-policies
+# [2025-11-04 11:20:07] WARN  :: 'export_policy_validation' halted due to client-side timeout
+# [2025-11-04 11:20:08] INFO  :: Test session summary:
+#    Total Test Cases: 3
+#    Passed: 0
+#    Failed: 3
+#    Skipped: 0
+# [2025-11-04 11:20:08] INFO  :: Defects recorded:
+#    1. volume_clone_validation - Authentication failure (invalid username/password)
+#    2. snapmirror_sync_validation - JSON parsing error (malformed API response)
+#    3. export_policy_validation - REST API timeout (client-side)
+# [2025-11-04 11:20:09] INFO  :: NATE Test session completed
+# [2025-11-04 11:20:09] INFO  :: Session log saved to /var/log/nate/session_20251104_client_defects_extended.log
+# """
+#     start =time.time()
+
+#     config = {"recursion_limit": 20}  # optional, can omit
+#     ontpparsed = ontap_log_parse(user_input)
+#     print(ontpparsed)
+
+#     result = await app.ainvoke({
+#     "messages": [
+#         # SystemMessage(content=system_prompt_message),
+#         SystemMessage(content="You are an ONTAP defect classifier. Use the correct tool for each log.If no tool is applicable then Mention that no tool is applicable and use your own knowledge in classifying the defect"),
+
+#         HumanMessage(content=ontpparsed)        # The user’s ONTAP log input
+#     ]
+# })   
+#     end_time = time.time()
+
+# # Calculate duration
+#     duration = end_time - start
+#     print(f"Operation completed at: {time.ctime(end_time)}")
+#     print(f"Duration of operation: {duration:.2f} seconds")
+
+#     print("\n--- FINAL OUTPUT ---")
+#     # print(result["messages"])
+#     print(result["messages"][-1].content)
+
+
+# # 9️⃣ Run it
+# if __name__ == "__main__":
+#     asyncio.run(main())
+
+
+
+#------------------------------------single-defect-tool---------------------------------------------------
+
+
+
+# import re
+# from collections import defaultdict
+# import time
+# import asyncio
+# from typing import TypedDict, Annotated
+# from ollama import ChatOllama, HumanMessage, SystemMessage, ToolNode
+
+# # -------------------------------
+# # 1️⃣ Local Log Extraction
+# # -------------------------------
+# def extract_log_info(log_text: str) -> dict:
+#     """Extract key info from ONTAP logs locally before sending to LLM."""
+#     patterns = {
+#         "timestamp": re.compile(r"\b\d{8}\s\d{6}\b"),
+#         "log_level": re.compile(r"\b(FAIL|ERROR|WARN|WARNING|INFO|DEBUG)\b", re.IGNORECASE),
+#         "function": re.compile(r"([A-Za-z0-9_:]+::[A-Za-z0-9_:]+)"),
+#         "module": re.compile(r"(/[\w/.\-]+\.pm)"),
+#         "line_number": re.compile(r"line\s+(\d+)"),
+#         "timeout": re.compile(r"\b(\d{2,5})\b"),
+#         "testcase": re.compile(r"test\s*case\s*[:=]\s*([\w\-]+)|testcase\s*[:=]\s*([\w\-]+)", re.IGNORECASE),
+#         "failure_summary": re.compile(r"Failed\s+due\s+to\s+(.+?)(?:$|\.|\n)", re.IGNORECASE),
+#     }
+
+#     log_summary = {key: set() for key in patterns}
+
+#     for line in log_text.splitlines():
+#         line = line.strip()
+#         # Pre-filter to speed up regex
+#         if not re.search(r"(ERROR|WARN|FAIL|WARNING)", line, re.IGNORECASE):
+#             continue
+#         for key, pattern in patterns.items():
+#             for match in pattern.finditer(line):
+#                 # Flatten tuple if regex returns multiple groups
+#                 val = match.group(0) if match.groups() == () else next(filter(None, match.groups()))
+#                 log_summary[key].add(val)
+
+#     # Convert sets to lists
+#     return {k: list(v) for k, v in log_summary.items()}
+
+
+# # -------------------------------
+# # 2️⃣ Combined Defect Analysis Tool
+# # -------------------------------
+# @tool
+# def analyze_ontap_defects(log_summary: str) -> str:
+#     """
+#     Single LLM tool for classifying both client-side and cluster configuration defects.
+#     Summarizes all relevant defects with root causes and mitigation steps.
+#     """
+#     prompt = f"""
+# You are an expert ONTAP defect classifier. Analyze the following log summary:
+
+# {log_summary}
+
+# 1. Identify all client-side defects (timeouts, NIC misconfigurations, session failures, API/SDK/JSON issues).
+# 2. Identify all cluster configuration defects (node quorum failures, interconnect/HA issues, MetroCluster replication problems, version mismatches).
+# 3. For each defect, provide:
+#    - Defect Type
+#    - Likely Root Cause
+#    - Suggested Mitigation Steps
+
+# Summarize in a single clear paragraph, avoiding unnecessary repetition.
+# """
+#     return prompt  # LLM invocation happens outside for async control
+
+
+# # -------------------------------
+# # 3️⃣ Async LLM Invocation
+# # -------------------------------
+# llm = ChatOllama(model="llama3.7b")  # smaller model for faster execution
+
+# async def analyze_log_async(log_text: str):
+#     start = time.time()
+#     # Step 1: Extract key fields locally
+#     log_summary_dict = extract_log_info(log_text)
+#     log_summary_str = "\n".join(f"{k}: {v}" for k, v in log_summary_dict.items())
+
+#     # Step 2: Prepare LLM prompt
+#     prompt = analyze_ontap_defects(log_summary_str)
+
+#     # Step 3: Invoke LLM once
+#     response = llm.invoke([
+#         SystemMessage(content="You are an ONTAP defect analysis assistant."),
+#         HumanMessage(content=prompt)
+#     ])
+
+#     end = time.time()
+#     print(f"Operation completed at: {time.ctime(end)}")
+#     print(f"Duration: {end - start:.2f} seconds")
+#     print("\n--- FINAL OUTPUT ---")
+#     print(response.content)
+
+
+# # -------------------------------
+# # 4️⃣ Run Example
+# # -------------------------------
+# if __name__ == "__main__":
+#     sample_log = """[2025-10-31 11:32:42] [ERROR] [ONTAP::Client::IO] Read operation failed:
+# Timeout while waiting for server response.
+# Request: GET_VOL_INFO volume1
+# Client IP: 10.42.18.75
+# Server IP: 10.42.18.10
+# Error: Connection timed out after 30000 ms
+# at /usr/lib/perl5/ONTAP/Client/IO.pm line 241.
+
+# [2025-10-31 11:32:42] [WARN] [ONTAP::Client::Retry] Retrying request due to network timeout (attempt 2/3)
+# at /usr/lib/perl5/ONTAP/Client/Retry.pm line 112.
+
+# [2025-10-31 11:32:45] [ERROR] [ONTAP::Client::Session] Client failed to establish a stable session.
+# Possible causes: client NIC misconfiguration or packet loss on client network path.
+# Exiting with status code 408."""
+
+#     asyncio.run(analyze_log_async(sample_log))
