@@ -1,0 +1,115 @@
+# from autogen_ext.models.ollama import OllamaChatCompletionClient
+# ollamamodel_client = OllamaChatCompletionClient(model="llama3.2")
+
+# from autogen_agentchat.messages import TextMessage
+# message = TextMessage(content="I'd like to go to London", source="user")
+# from autogen_agentchat.messages import TextMessage, MultiModalMessage
+
+
+# from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
+# from autogen_core import CancellationToken
+
+# from autogen_ext.models.ollama import OllamaChatCompletionClient
+# from autogen_core.models import UserMessage
+# from autogen_agentchat.conditions import  TextMentionTermination
+
+# from langchain_community.utilities import GoogleSerperAPIWrapper
+# from langchain_core.tools import Tool
+# from autogen_ext.tools.langchain import LangChainToolAdapter
+# from dotenv import load_dotenv
+# from autogen_agentchat.teams import RoundRobinGroupChat
+# import os
+# load_dotenv(override=True)
+
+# from playwright.sync_api import sync_playwright
+# # from langchain.agents import tool
+# from langchain_core.tools import Tool
+
+
+
+# # ollama_client = OllamaChatCompletionClient(
+# #         model="llama3.2",  # Specify the model you pulled with Ollama
+# # )
+# # def navigate_and_extract(url: str, selector: str = None) -> str:
+# #     """Fetch page content or text of an element without showing the browser."""
+# #     with sync_playwright() as p:
+# #         browser = p.chromium.launch(headless=True)  # headless=True hides the browser
+# #         page = browser.new_page()
+# #         page.goto(url, wait_until="domcontentloaded", timeout=15000)
+
+# #         if selector:
+# #             try:
+# #                 content = page.locator(selector).inner_text()
+# #             except Exception:
+# #                 content = f"Selector '{selector}' not found."
+# #         else:
+# #             content = page.inner_text()
+
+# #         browser.close()
+# #         return content
+
+# import requests
+# from bs4 import BeautifulSoup
+
+# def navigate_and_extract(url:str):
+#     html = requests.get(url, timeout=10).text
+#     soup = BeautifulSoup(html, "html.parser")
+#     return soup.get_text()
+
+# isearch =Tool(name="internet_search", func=navigate_and_extract, description="useful for when you need to search the internet")
+# isearchtool = LangChainToolAdapter(isearch)
+
+
+
+# # agen = AssistantAgent(
+# #     name="agent",
+# #     system_message=(
+# #         "You are an expert in parsing error logs. Extract relevant information from ONTAP log for classifying the defect and convert it into a single paragraph "
+    
+# #     ),
+# #     model_client=ollamamodel_client,
+# #     tools=[isearchtool]
+# # )
+
+# # result = agen.run("Get the title of https://example.com")
+# # print(result)
+
+# agent = AssistantAgent(
+#     name="agent",
+#     system_message=(
+#         "You are an expert in parsing error logs. Extract relevant information "
+#         "from ONTAP log for classifying the defect and convert it into a single paragraph."
+#     ),
+#     model_client=ollamamodel_client,
+#     tools=[isearchtool]
+# )
+
+# # Now call run() on the instance
+# import asyncio
+
+# # ---- your agent setup ----
+# # agent = AssistantAgent(...)
+
+# async def run_agent_task():
+#     """Run an async agent call properly."""
+#     result = await agent.run(task="Extract the content of https://getbootstrap.com/docs/5.3/getting-started/introduction/")
+#     print(result)
+#     return result
+
+# if __name__ == "__main__":
+    
+#     result = asyncio.run(run_agent_task())
+
+# # If result contains messages (like in your log)
+#     if hasattr(result, "messages"):
+#         # Get the last message
+#         final_message = result.messages[-1]
+#         print("\nFinal message type:", final_message.type)
+#         print("Final content:\n", final_message.content)
+#     else:
+#         # Some versions return content directly
+#         print(result)
+
+# import inspect
+# print(inspect.iscoroutinefunction(agent.run))
+# #------------------------------------------runtime age
