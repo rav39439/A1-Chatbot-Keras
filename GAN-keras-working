@@ -29,7 +29,7 @@ from matplotlib import pyplot as plt
 # testX = rgb2gray(testX).reshape(-1, 32, 32, 1)
 # # scale to [-1,1]
 # trainX = (trainX - 127.5) / 127.5
-# testX = (testX - 127.5) / 127.5
+# testX = (testX - 127.5) / 127.
 
 def define_discriminator(in_shape=(28,28,1)):
     print("asdddddddg")
@@ -43,90 +43,6 @@ def define_discriminator(in_shape=(28,28,1)):
     model.add(Flatten()) # 7*7*128 = 6272
     model.add(Dropout(0.4))
     model.add(Dense(1, activation='sigmoid'))
-
-
-
-
-  import pandas as pd
-from numpy import asarray, ones, zeros
-from numpy.random import randint, randn
-
-# -----------------------------
-# 1. Load real samples from train.csv
-# -----------------------------
-def load_real_samples(csv_file='/kaggle/input/digit-recognizer/train.csv'):
-    # Read CSV
-    data = pd.read_csv(csv_file)
-    
-    # Separate images (assume first column is label)
-    X = data.iloc[:, 1:].values.astype('float32')  # pixel values
-    # Reshape to images (n_samples, 28, 28, 1)
-    X = X.reshape(-1, 28, 28, 1)
-    
-    # Scale from [0,255] to [-1,1]
-    X = (X - 127.5) / 127.5
-    return X
-
-# -----------------------------
-# 2. Generate real samples
-# -----------------------------
-def generate_real_samples(dataset, n_samples):
-    ix = randint(0, dataset.shape[0], n_samples)
-    X = dataset[ix]
-    y = ones((n_samples, 1))  # Label = 1 for real
-    return X, y
-
-# -----------------------------
-# 3. Generate latent points
-# -----------------------------
-def generate_latent_points(latent_dim, n_samples):
-    x_input = randn(latent_dim * n_samples)
-    x_input = x_input.reshape(n_samples, latent_dim)
-    return x_input
-
-# -----------------------------
-# 4. Generate fake samples
-# -----------------------------
-def generate_fake_samples(generator, latent_dim, n_samples):
-    x_input = generate_latent_points(latent_dim, n_samples)
-    X = generator.predict(x_input)
-    y = zeros((n_samples, 1))  # Label = 0 for fake
-    return X, y
-
-# -----------------------------
-# Testing all functions
-# -----------------------------
-if __name__ == "__main__":
-    # 1. Load real samples
-    X_real_dataset = load_real_samples('/kaggle/input/digit-recognizer/train.csv')
-    print("Loaded real dataset shape:", X_real_dataset.shape)
-    print("Pixel range:", X_real_dataset.min(), "to", X_real_dataset.max())
-
-    # 2. Generate a batch of real samples
-    X_real, y_real = generate_real_samples(X_real_dataset, 5)
-    print("\nReal samples batch shape:", X_real.shape)
-    print("Real labels:", y_real.flatten())
-    print("First image pixel example (top-left):", X_real[0,0,0,0])
-
-    # 3. Generate latent points
-    latent_dim = 100
-    latent_points = generate_latent_points(latent_dim, 5)
-    print("\nLatent points shape:", latent_points.shape)
-    print("Latent point example:", latent_points[0, :5])
-
-    # 4. Generate fake samples (dummy generator for testing)
-    class DummyGenerator:
-        def predict(self, latent_points):
-            n_samples = latent_points.shape[0]
-            return (randn(n_samples, 28, 28, 1) / 2).clip(-1, 1)
-
-    generator = DummyGenerator()
-    X_fake, y_fake = generate_fake_samples(generator, latent_dim, 5)
-    print("\nFake samples batch shape:", X_fake.shape)
-    print("Fake labels:", y_fake.flatten())
-    print("Fake sample pixel example (top-left):", X_fake[0,0,0,0])
-
-
     
     opt = Adam(learning_rate=0.0002, beta_1=0.5)
     model.compile(loss='binary_crossentropy', optimizer=opt, metrics=['accuracy'])
@@ -218,103 +134,202 @@ gan_output = gan_model.predict(z_input)
 print("GAN output shape:", gan_output.shape)
 
 
-def train(g_model, d_model, gan_model, dataset, latent_dim, n_epochs=100, n_batch=128):
-    bat_per_epo = int(dataset.shape[0] / n_batch)
-    half_batch = int(n_batch / 2)  # discriminator updated with half real + half fake
+import pandas as pd
+from numpy import asarray, ones, zeros
+from numpy.random import randint, randn
 
-    # manually enumerate epochs and batche
-    for i in range(n_epochs):
-        # enumerate batches over the training set
-        for j in range(bat_per_epo):
+# -----------------------------
+# 1. Load real samples from train.csv
+# -----------------------------
+def load_real_samples(csv_file='/kaggle/input/digit-recognizer/train.csv'):
+    # Read CSV
+    data = pd.read_csv(csv_file)
+    
+    # Separate images (assume first column is label)
+    X = data.iloc[:, 1:].values.astype('float32')  # pixel values
+    # Reshape to images (n_samples, 28, 28, 1)
+    X = X.reshape(-1, 28, 28, 1)
+    
+    # Scale from [0,255] to [-1,1]
+    X = (X - 127.5) / 127.5
+    return X
 
-            # Train the discriminator on real images
-            X_real, y_real = generate_real_samples(dataset, half_batch)
-            print(X_real.shape)
-            print(y_real.shape)
-            d_loss_real, _ = d_model.train_on_batch(X_real, y_real)
+# -----------------------------
+# 2. Generate real samples
+# -----------------------------
+def generate_real_samples(dataset, n_samples):
+    ix = randint(0, dataset.shape[0], n_samples)
+    X = dataset[ix]
+    y = ones((n_samples, 1))  # Label = 1 for real
+    return X, y
 
-            # Train the discriminator on fake images
-            X_fake, y_fake = generate_fake_samples(g_model, latent_dim, half_batch)
-            d_loss_fake, _ = d_model.train_on_batch(X_fake, y_fake)
+# -----------------------------
+# 3. Generate latent points
+# -----------------------------
+def generate_latent_points(latent_dim, n_samples):
+    x_input = randn(latent_dim * n_samples)
+    x_input = x_input.reshape(n_samples, latent_dim)
+    return x_input
 
-            # Prepare points in latent space as input for the generator
-            X_gan = generate_latent_points(latent_dim, n_batch)
+# -----------------------------
+# 4. Generate fake samples
+# -----------------------------
+def generate_fake_samples(generator, latent_dim, n_samples):
+    x_input = generate_latent_points(latent_dim, n_samples)
+    X = generator.predict(x_input)
+    y = zeros((n_samples, 1))  # Label = 0 for fake
+    return X, y
 
-            # Generator wants discriminator to label generated samples as real (ones)
-            y_gan = ones((n_batch, 1))
+# -----------------------------
+# Testing all functions
+# -----------------------------
+if __name__ == "__main__":
+    # 1. Load real samples
+    X_real_dataset = load_real_samples('/kaggle/input/digit-recognizer/train.csv')
+    print("Loaded real dataset shape:", X_real_dataset.shape)
+    print("Pixel range:", X_real_dataset.min(), "to", X_real_dataset.max())
 
-            # Update the generator via the discriminator's error
-            g_loss = gan_model.train_on_batch(X_gan, y_gan)
+    # 2. Generate a batch of real samples
+    X_real, y_real = generate_real_samples(X_real_dataset, 5)
+    print("\nReal samples batch shape:", X_real.shape)
+    print("Real labels:", y_real.flatten())
+    print("First image pixel example (top-left):", X_real[0,0,0,0])
 
-            # Print losses for this batch
-            print('Epoch>%d, Batch %d/%d, d1=%.3f, d2=%.3f g=%.3f' %
-                  (i+1, j+1, bat_per_epo, d_loss_real, d_loss_fake, g_loss))
+    # 3. Generate latent points
+    latent_dim = 100
+    latent_points = generate_latent_points(latent_dim, 5)
+    print("\nLatent points shape:", latent_points.shape)
+    print("Latent point example:", latent_points[0, :5])
 
-    # Save the generator model after training
-    g_model.save('cifar_generator_2epochs.h5')
+    # 4. Generate fake samples (dummy generator for testing)
+    class DummyGenerator:
+        def predict(self, latent_points):
+            n_samples = latent_points.shape[0]
+            return (randn(n_samples, 28, 28, 1) / 2).clip(-1, 1)
 
-
-###################################################################
-# Train the GAN with dummy/testing setup
-
-print("Starting GAN training...")
-
-# size of the latent space
-latent_dim = 100
-
-# create the discriminator
-discriminator = define_discriminator()
-
-# create the generator
-generator = define_generator(latent_dim)
-
-# create the GAN
-gan_model = define_gan(generator, discriminator)
-
-# load image data
-dataset = load_real_samples()
-
-# train model for 2 epochs
-train(generator, discriminator, gan_model, dataset, latent_dim, n_epochs=2)
+    generator = DummyGenerator()
+    X_fake, y_fake = generate_fake_samples(generator, latent_dim, 5)
+    print("\nFake samples batch shape:", X_fake.shape)
+    print("Fake labels:", y_fake.flatten())
+    print("Fake sample pixel example (top-left):", X_fake[0,0,0,0])
 
 
-import numpy as np
-from keras.models import load_model
+
+# def train(g_model, d_model, gan_model, dataset, latent_dim, n_epochs=100, n_batch=128):
+#     bat_per_epo = int(dataset.shape[0] / n_batch)
+#     half_batch = int(n_batch / 2)  # discriminator updated with half real + half fake
+
+#     # manually enumerate epochs and batche
+#     for i in range(n_epochs):
+#         # enumerate batches over the training set
+#         for j in range(bat_per_epo):
+
+#             # Train the discriminator on real images
+#             X_real, y_real = generate_real_samples(dataset, half_batch)
+#             # print(X_real.shape)
+#             # print(y_real.shape)
+#             d_loss_real, _ = d_model.train_on_batch(X_real, y_real)
+
+#             # Train the discriminator on fake images
+#             X_fake, y_fake = generate_fake_samples(g_model, latent_dim, half_batch)
+#             d_loss_fake, _ = d_model.train_on_batch(X_fake, y_fake)
+
+#             # Prepare points in latent space as input for the generator
+#             X_gan = generate_latent_points(latent_dim, n_batch)
+
+#             # Generator wants discriminator to label generated samples as real (ones)
+#             y_gan = ones((n_batch, 1))
+
+#             # Update the generator via the discriminator's error
+#             g_loss = gan_model.train_on_batch(X_gan, y_gan)
+
+#             # Print losses for this batch
+#             print('Epoch>%d, Batch %d/%d, d1=%.3f, d2=%.3f g=%.3f' %
+#                   (i+1, j+1, bat_per_epo, d_loss_real, d_loss_fake, g_loss))
+
+#     # Save the generator model after training
+#     g_model.save('/kaggle/working/cifar_generator_2epochs.h5')
+
+
+# ###################################################################
+# # Train the GAN with dummy/testing setup
+
+# print("Starting GAN training...")
+
+# # size of the latent space
+# latent_dim = 100
+
+# # create the discriminator
+# discriminator = define_discriminator()
+
+# # create the generator
+# generator = define_generator(latent_dim)
+
+# # create the GAN
+# gan_model = define_gan(generator, discriminator)
+
+# # load image data
+# dataset = load_real_samples()
+
+# # train model for 2 epochs
+# train(generator, discriminator, gan_model, dataset, latent_dim, n_epochs=5)
+
+
+# import numpy as np
+# from keras.models import load_model
+# import matplotlib.pyplot as plt
+
+# # -------------------------------
+# # Create 2 dummy latent vectors
+# # -------------------------------
+# latent_dim = 100                # must match training
+# latent_points = np.random.randn(2, latent_dim)
+
 import matplotlib.pyplot as plt
+from keras.models import load_model
+import numpy as np
 
-# -------------------------------
-# Create 2 dummy latent vectors
-# -------------------------------
-latent_dim = 100                # must match training
-latent_points = np.random.randn(2, latent_dim)
+# Plot generated images 
+def show_plot(examples, n):
+    plt.figure(figsize=(8, 8))
+    for i in range(n * n):
+        plt.subplot(n, n, 1 + i)
+        plt.axis('off')
 
-# -------------------------------
+        # If single-channel (MNIST-like)
+        if examples.shape[-1] == 1:
+            plt.imshow(examples[i, :, :, 0], cmap='gray')
+
+        # If RGB (CIFAR-like)
+        else:
+            plt.imshow(examples[i, :, :, :])
+    plt.show()
+
+
+# ------------------------------
 # Load trained generator
-# -------------------------------
-generator = load_model("cifar_generator_2epochs.h5")   # change name if needed
+# ------------------------------
+model = load_model('/kaggle/working/cifar_generator_2epochs.h5')
 
-# -------------------------------
-# Generate 2 fake images
-# -------------------------------
-generated_images = generator.predict(latent_points)
+# ------------------------------
+# Generate latent vectors
+# ------------------------------
+latent_points = randn(25, 100)  # (n_samples, latent_dim)
 
-# If images are in [-1,1], rescale to [0,1]
-generated_images = (generated_images + 1) / 2.0
+# ------------------------------
+# Generate fake images
+# ------------------------------
+X = model.predict(latent_points)
 
-# -------------------------------
-# Plot both images
-# -------------------------------
-plt.figure(figsize=(4, 2))
+# Rescale from [-1,1] → [0,1]
+X = (X + 1) / 2.0
 
-for i in range(2):
-    plt.subplot(1, 2, i + 1)
-    plt.axis("off")
+# Convert to uint8 pixels
+X = (X * 255).astype(np.uint8)
 
-    # Handle grayscale or RGB
-    if generated_images.shape[-1] == 1:
-        plt.imshow(generated_images[i, :, :, 0], cmap="gray")
-    else:
-        plt.imshow(generated_images[i])
+# ------------------------------
+# Show images in 5×5 grid
+# ------------------------------
+show_plot(X, 5)
 
-plt.show()
 
