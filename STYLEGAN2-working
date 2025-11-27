@@ -1,0 +1,456 @@
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# -----------------------------
+# Step 1: Mapping Network
+# -----------------------------
+class MappingNetwork(nn.Module):
+    def __init__(self, z_dim=512, w_dim=512, num_layers=8):
+        super().__init__()
+        layers = []
+        for _ in range(num_layers):
+            layers.append(nn.Linear(z_dim, w_dim))
+            layers.append(nn.LeakyReLU(0.2))
+            z_dim = w_dim
+        self.mapping = nn.Sequential(*layers)
+
+    def forward(self, z):
+        return self.mapping(z)
+
+# -----------------------------
+# Step 2: Styled Convolution
+# -----------------------------
+class StyledConv(nn.Module):
+    def __init__(self, in_c, out_c, w_dim, kernel_size=3):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.weight = nn.Parameter(torch.randn(1, out_c, in_c, kernel_size, kernel_size))
+        self.style_mod = nn.Linear(w_dim, in_c)
+        self.pad = kernel_size // 2
+
+    def forward(self, x, w):
+        B, C_in, H, W = x.shape
+        style = self.style_mod(w).view(B, 1, C_in, 1, 1)
+        weight = self.weight * (style + 1)
+
+        demod = torch.rsqrt(weight.pow(2).sum([2,3,4]) + 1e-8)
+        weight = weight * demod.view(B, -1, 1, 1, 1)
+
+        k = self.kernel_size
+        weight = weight.view(B * weight.shape[1], weight.shape[2], k, k)
+        x = x.view(1, B * C_in, H, W)
+        out = F.conv2d(x, weight, padding=self.pad, groups=B)
+        out = out.view(B, -1, out.shape[2], out.shape[3])
+        return out
+
+# -----------------------------
+# Step 3: Noise + Activation
+# -----------------------------
+class NoiseInjection(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(1, channels, 1, 1))
+
+    def forward(self, x):
+        noise = torch.randn(x.size(0), 1, x.size(2), x.size(3), device=x.device)
+        return x + self.weight * noise
+
+class StyledConvBlock(nn.Module):
+    def __init__(self, in_c, out_c, w_dim):
+        super().__init__()
+        self.styled_conv = StyledConv(in_c, out_c, w_dim)
+        self.noise = NoiseInjection(out_c)
+        self.act = nn.LeakyReLU(0.2)
+
+    def forward(self, x, w):
+        x = self.styled_conv(x, w)
+        x = self.noise(x)
+        x = self.act(x)
+        return x
+
+# -----------------------------
+# Step 4: ToRGB (outputs 1 channel)
+# -----------------------------
+class ToRGB(nn.Module):
+    def __init__(self, in_c, w_dim, out_channels=1):
+        super().__init__()
+        self.conv = nn.Conv2d(in_c, out_channels, kernel_size=1)
+        self.style_mod = nn.Linear(w_dim, in_c)
+
+    def forward(self, x, w):
+        style = self.style_mod(w).view(x.size(0), x.size(1), 1, 1)
+        x = x * (style + 1)
+        return self.conv(x)
+
+# -----------------------------
+# Final Generator
+# -----------------------------
+class MiniStyleGAN2Generator(nn.Module):
+    def __init__(self, z_dim=512, w_dim=512):
+        super().__init__()
+        self.mapping = MappingNetwork(z_dim, w_dim)
+        self.constant = nn.Parameter(torch.randn(1, 512, 4, 4))
+
+        self.block1 = StyledConvBlock(512, 512, w_dim)
+        self.block2 = StyledConvBlock(512, 256, w_dim)
+        self.block3 = StyledConvBlock(256, 128, w_dim)
+
+        self.to_rgb3 = ToRGB(128, w_dim)
+
+    def forward(self, z):
+        w = self.mapping(z)
+
+        x = self.constant.repeat(z.size(0), 1, 1, 1)
+
+        x = self.block1(x, w)         # 4 → 8
+        x = F.interpolate(x, scale_factor=2, mode='nearest')
+
+        x = self.block2(x, w)         # 8 → 16
+        x = F.interpolate(x, scale_factor=2, mode='nearest')
+
+        x = self.block3(x, w)         # 16 → 32
+        x = F.interpolate(x, size=(28, 28), mode='bilinear')
+
+        rgb = self.to_rgb3(x, w)      # → [B,1,28,28]
+
+        return torch.tanh(rgb)
+
+# -----------------------------
+# Test
+# -----------------------------
+B = 2
+gen = MiniStyleGAN2Generator()
+z = torch.randn(B, 512)
+out = gen(z)
+print("Generator output:", out.shape)  # should be [2,1,28,28]
+
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# -----------------------------
+# Step 1: Input normalization
+# -----------------------------
+class DiscriminatorInput(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return x  # generator output assumed [-1,1]
+
+# -----------------------------
+# Step 2: Conv block
+# -----------------------------
+class DiscriminatorConvBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, downsample=True):
+        super().__init__()
+        # Step 6: apply spectral normalization to conv layers
+        self.conv1 = nn.utils.spectral_norm(nn.Conv2d(in_channels, out_channels, 3, padding=1))
+        self.act1 = nn.LeakyReLU(0.2)
+        self.conv2 = nn.utils.spectral_norm(nn.Conv2d(out_channels, out_channels, 3, padding=1))
+        self.act2 = nn.LeakyReLU(0.2)
+        self.downsample = downsample
+
+    def forward(self, x):
+        x = self.act1(self.conv1(x))
+        x = self.act2(self.conv2(x))
+        if self.downsample:
+            x = F.avg_pool2d(x, 2)
+        return x
+
+# -----------------------------
+# Step 3: Mini-batch StdDev
+# -----------------------------
+class MiniBatchStdDev(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        std = torch.std(x, dim=0, keepdim=True)
+        mean_std = std.mean(dim=1, keepdim=True)
+        std_map = mean_std.repeat(B, 1, 1, 1)
+        x = torch.cat([x, std_map], dim=1)
+        return x
+
+class MiniDiscriminator(nn.Module):
+    def __init__(self, img_channels=1):
+        super().__init__()
+        self.conv1 = nn.Conv2d(img_channels, 64, 3, stride=2, padding=1)   # [B,64,14,14]
+        self.conv2 = nn.Conv2d(64, 128, 3, stride=2, padding=1)            # [B,128,7,7]
+        self.act = nn.LeakyReLU(0.2)
+        
+        # Flattened size for fc1
+        self.flattened_size = 128 * 7 * 7
+        self.fc1 = nn.Linear(self.flattened_size, 128)
+        self.fc2 = nn.Linear(128, 1)  # output: real/fake probability
+
+    def forward(self, x):
+        x = self.act(self.conv1(x))
+        x = self.act(self.conv2(x))
+        x = x.view(x.size(0), -1)   # flatten
+        x = self.act(self.fc1(x))
+        x = torch.sigmoid(self.fc2(x))
+        return x
+
+# ----------------------------
+# Steps 4 & 5: Flatten + FC + Output
+# -----------------------------
+
+# -----------------------------
+# Test full discriminator
+# -----------------------------
+B = 2
+img_channels = 1
+H, W = 28, 28
+x = torch.randn(B, img_channels, H, W)
+
+discriminator = MiniDiscriminator(img_channels=img_channels)
+out = discriminator(x)
+print("Discriminator final output (real/fake probability):", out.shape)
+print(out)
+
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+import pandas as pd
+from PIL import Image
+import torchvision.transforms as transforms
+import torch.nn.functional as F
+from tqdm import tqdm
+
+# -----------------------------
+# Load MNIST CSV Dataset
+# -----------------------------
+# class MNISTDataset(Dataset):
+#     def __init__(self, csv_path, transform=None, max_samples=10000):
+#         self.data = pd.read_csv(csv_path).head(max_samples)
+#         self.transform = transform
+
+#     def __len__(self):
+#         return len(self.data)
+
+#     def __getitem__(self, idx):
+#         img_array = self.data.drop('label', axis=1).iloc[idx].values.astype('uint8').reshape(28,28)
+#         img = Image.fromarray(img_array)
+#         if self.transform:
+#             img = self.transform(img)
+#         return img
+
+class MNISTDataset(Dataset):
+    def __init__(self, csv_path, transform=None, max_samples=1000):
+        # load only first `max_samples` rows from the CSV
+        self.data = pd.read_csv(csv_path).head(max_samples)
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        # reshape flat 784 pixels to 28x28
+        img_array = (
+            self.data
+            .drop('label', axis=1)
+            .iloc[idx]
+            .values
+            .astype('uint8')
+            .reshape(28, 28)
+        )
+
+        img = Image.fromarray(img_array)
+
+        if self.transform:
+            img = self.transform(img)
+
+        return img
+
+# Transform MNIST to tensor [-1,1]
+transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize([0.5], [0.5])  # map 0-1 to [-1,1]
+])
+
+csv_path = '/kaggle/input/digit-recognizer/train.csv'  # replace path
+# dataset = MNISTDataset(csv_path, transform=transform)
+dataset = MNISTDataset(
+    csv_path,
+    transform=transform,
+    max_samples=5000       # <-- only load 40 images
+)
+dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+# -----------------------------
+# Generator + Discriminator
+# -----------------------------
+# Use your existing MiniStyleGAN2Generator code
+gen = MiniStyleGAN2Generator().to(device)  # MNIST is grayscale
+dis = MiniDiscriminator(img_channels=1).to(device)       # Discriminator for 1 channel
+
+# Optimizers
+lr = 1e-4
+# optimizer_G = optim.Adam(gen.parameters(), lr=lr, betas=(0.5,0.999))
+# optimizer_D = optim.Adam(dis.parameters(), lr=lr, betas=(0.5,0.999))
+# optimizer_G = torch.optim.Adam(gen.parameters(), lr=1e-4, betas=(0.0, 0.99))
+# optimizer_D = torch.optim.Adam(dis.parameters(), lr=1e-4, betas=(0.0, 0.99))
+optimizer_G = torch.optim.Adam(gen.parameters(), lr=1e-4, betas=(0.0, 0.99))
+optimizer_D = torch.optim.Adam(dis.parameters(), lr=4e-5, betas=(0.0, 0.99))  # smaller LR for D
+
+# Loss
+criterion = nn.BCELoss()
+
+# -----------------------------
+# Training loop
+# -----------------------------
+num_epochs = 5
+for epoch in range(num_epochs):
+    loop = tqdm(dataloader)
+    for imgs in loop:
+        imgs = imgs.to(device)
+        B = imgs.size(0)
+
+        # ---------------------------
+        # Train Discriminator
+        # ---------------------------
+        optimizer_D.zero_grad()
+        
+        # Real images
+        real_labels = torch.ones(B,1).to(device)
+        outputs_real = dis(imgs)
+        loss_real = criterion(outputs_real, real_labels)
+        
+        # Fake images
+        z = torch.randn(B, 512).to(device)
+        fake_imgs = gen(z)
+       
+        fake_labels = torch.zeros(B,1).to(device)
+        outputs_fake = dis(fake_imgs.detach())
+        loss_fake = criterion(outputs_fake, fake_labels)
+        
+        # Total D loss
+        loss_D = loss_real + loss_fake
+        loss_D.backward()
+        optimizer_D.step()
+
+        # ---------------------------
+        # Train Generator
+        # ---------------------------
+        optimizer_G.zero_grad()
+        outputs_fake = dis(fake_imgs)
+        # Generator tries to fool discriminator
+        loss_G = criterion(outputs_fake, real_labels)
+        loss_G.backward()
+        optimizer_G.step()
+
+        loop.set_description(f"Epoch [{epoch+1}/{num_epochs}]")
+        loop.set_postfix(Loss_D=loss_D.item(), Loss_G=loss_G.item())
+
+print("Training finishe")
+#.............................................
+
+# def d_loss_fn(real, fake):
+#     loss_real = torch.mean(F.relu(1.0 - real))
+#     loss_fake = torch.mean(F.relu(1.0 + fake))
+#     return loss_real + loss_fake
+
+# def g_loss_fn(fake):
+#     return -torch.mean(fake)
+
+# # -----------------------------
+# # Training loop
+# # -----------------------------
+# num_epochs = 30
+# for epoch in range(num_epochs):
+#     loop = tqdm(dataloader)
+#     for real_imgs in loop:
+#         real_imgs = real_imgs.to(device)
+
+#         B = real_imgs.size(0)
+
+#         # ---------------------------
+#         # Train Discriminator
+#         # ---------------------------
+#         optimizer_D.zero_grad()
+
+#         z = torch.randn(B,512).to(device)
+#         fake_imgs = gen(z)
+
+#         real_out = dis(real_imgs)
+#         fake_out = dis(fake_imgs.detach())
+
+#         loss_D = d_loss_fn(real_out, fake_out)
+#         loss_D.backward()
+#         optimizer_D.step()
+
+#         # ---------------------------
+#         # Train Generator
+#         # ---------------------------
+#         optimizer_G.zero_grad()
+
+#         fake_out = dis(fake_imgs)
+#         loss_G = g_loss_fn(fake_out)
+#         loss_G.backward()
+#         optimizer_G.step()
+
+#         loop.set_description(f"Epoch [{epoch+1}/{num_epochs}]")
+#         loop.set_postfix(Loss_D=loss_D.item(), Loss_G=loss_G.item())
+
+
+
+
+#.................................................
+# -----------------------------
+# Test generator output
+# -----------------------------
+import matplotlib.pyplot as plt
+
+# -----------------------------
+# Step 1: Pick 3 random samples
+# -----------------------------
+indices = torch.randint(0, len(dataset), (3,)).tolist()
+real_imgs = torch.stack([dataset[i] for i in indices]).to(device)
+
+# -----------------------------
+# Step 2: Generate 3 fake images
+# -----------------------------
+z = torch.randn(3, 512).to(device)
+with torch.no_grad():
+    fake_imgs = gen(z)
+
+# -----------------------------
+# Step 3: Convert to CPU + denormalize
+# -----------------------------
+real_imgs = real_imgs * 0.5 + 0.5     # [-1,1] → [0,1]
+fake_imgs = fake_imgs * 0.5 + 0.5     # [-1,1] → [0,1]
+
+real_imgs = real_imgs.cpu()
+fake_imgs = fake_imgs.cpu()
+
+# -----------------------------
+# Step 4: Show results
+# -----------------------------
+plt.figure(figsize=(6, 4))
+
+for i in range(3):
+    plt.subplot(2, 3, i+1)
+    plt.title(f"Real {i+1}")
+    plt.imshow(real_imgs[i,0], cmap='gray')
+    plt.axis("off")
+
+for i in range(3):
+    plt.subplot(2, 3, i+4)
+    plt.title(f"Fake {i+1}")
+    plt.imshow(fake_imgs[i,0], cmap='gray')
+    plt.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
