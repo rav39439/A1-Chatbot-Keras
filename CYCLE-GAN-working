@@ -1,0 +1,264 @@
+
+
+
+from tensorflow.keras.layers import *
+from tensorflow.keras.models import Model
+from tensorflow.keras.initializers import RandomNormal
+from tensorflow.keras.optimizers import Adam
+import numpy as np
+import matplotlib.pyplot as plt
+
+# -----------------------------------------------------------
+#  DISCRIMINATOR
+# -----------------------------------------------------------
+def define_discriminator(image_shape):
+    init = RandomNormal(stddev=0.02)
+    in_image = Input(shape=image_shape)
+
+    d = Conv2D(64, (4,4), strides=(2,2), padding='same',
+               kernel_initializer=init)(in_image)
+    d = LeakyReLU(0.2)(d)
+
+    d = Conv2D(128, (4,4), strides=(2,2), padding='same',
+               kernel_initializer=init)(d)
+    d = BatchNormalization()(d)
+    d = LeakyReLU(0.2)(d)
+
+    d = Conv2D(256, (4,4), strides=(2,2), padding='same',
+               kernel_initializer=init)(d)
+    d = BatchNormalization()(d)
+    d = LeakyReLU(0.2)(d)
+
+    d = Conv2D(512, (4,4), strides=(2,2), padding='same',
+               kernel_initializer=init)(d)
+    d = BatchNormalization()(d)
+    d = LeakyReLU(0.2)(d)
+
+    d = Conv2D(512, (4,4), padding='same',
+               kernel_initializer=init)(d)
+    d = BatchNormalization()(d)
+    d = LeakyReLU(0.2)(d)
+
+    patch_out = Conv2D(1, (4,4), padding='same',
+                       kernel_initializer=init)(d)
+
+    model = Model(in_image, patch_out)
+    model.compile(loss='mse',
+                  optimizer=Adam(0.0002, beta_1=0.5),
+                  loss_weights=[0.5])
+    return model
+
+# -----------------------------------------------------------
+#  RESNET BLOCK
+# -----------------------------------------------------------
+def resnet_block(n_filters, input_layer):
+    init = RandomNormal(stddev=0.02)
+
+    g = Conv2D(n_filters, (3,3), padding='same',
+               kernel_initializer=init)(input_layer)
+    g = BatchNormalization()(g)
+    g = Activation('relu')(g)
+
+    g = Conv2D(n_filters, (3,3), padding='same',
+               kernel_initializer=init)(g)
+    g = BatchNormalization()(g)
+
+    g = Concatenate()([g, input_layer])
+    return g
+
+# -----------------------------------------------------------
+#  GENERATOR
+# -----------------------------------------------------------
+def define_generator(image_shape, n_resnet=6):
+    init = RandomNormal(stddev=0.02)
+    in_image = Input(shape=image_shape)
+
+    g = Conv2D(64, (7,7), padding='same',
+               kernel_initializer=init)(in_image)
+    g = BatchNormalization()(g)
+    g = Activation('relu')(g)
+
+    g = Conv2D(128, (3,3), strides=(2,2), padding='same',
+               kernel_initializer=init)(g)
+    g = BatchNormalization()(g)
+    g = Activation('relu')(g)
+
+    g = Conv2D(256, (3,3), strides=(2,2), padding='same',
+               kernel_initializer=init)(g)
+    g = BatchNormalization()(g)
+    g = Activation('relu')(g)
+
+    for _ in range(n_resnet):
+        g = resnet_block(256, g)
+
+    g = Conv2DTranspose(128, (3,3), strides=(2,2), padding='same',
+                        kernel_initializer=init)(g)
+    g = BatchNormalization()(g)
+    g = Activation('relu')(g)
+
+    g = Conv2DTranspose(64, (3,3), strides=(2,2), padding='same',
+                        kernel_initializer=init)(g)
+    g = BatchNormalization()(g)
+    g = Activation('relu')(g)
+
+    # output channels = 3 for RGB
+    g = Conv2D(3, (7,7), padding='same',
+               kernel_initializer=init)(g)
+    g = BatchNormalization()(g)
+
+    out_image = Activation('tanh')(g)
+
+    return Model(in_image, out_image)
+
+# -----------------------------------------------------------
+#  COMPOSITE MODEL
+# -----------------------------------------------------------
+def define_composite_model(g1, d_model, g2, image_shape):
+    g1.trainable = True
+    d_model.trainable = False
+    g2.trainable = False
+
+    input_gen = Input(shape=image_shape)
+    gen1_out = g1(input_gen)
+    output_d = d_model(gen1_out)
+
+    input_id = Input(shape=image_shape)
+    output_id = g1(input_id)
+
+    output_fwd = g2(gen1_out)
+    gen2_out = g2(input_id)
+    output_back = g1(gen2_out)
+
+    model = Model([input_gen, input_id],
+                  [output_d, output_id, output_fwd, output_back])
+
+    model.compile(
+        loss=['mse', 'mae', 'mae', 'mae'],
+        loss_weights=[1, 5, 10, 10],
+        optimizer=Adam(0.0002, beta_1=0.5)
+    )
+    return model
+
+# -----------------------------------------------------------
+#  TEST RANDOM RGB IMAGE
+# -----------------------------------------------------------
+image_shape = (28,28,3)
+d = define_discriminator(image_shape)
+gA = define_generator(image_shape)
+
+x1 = np.random.uniform(-1,1,(1,28,28,3)).astype('float32')
+x2 = np.random.uniform(-1,1,(1,28,28,3)).astype('float32')
+
+fake_img = gA.predict(x1)
+print("Random RGB input shape:", x1.shape)
+print("Generated RGB output shape:", fake_img.shape)
+
+
+
+
+import os
+from tensorflow.keras.preprocessing.image import load_img, img_to_array
+
+def load_images(path="", size=(28,28)):
+    files = []
+    folder = os.listdir(path)
+    for f in folder:
+        img = load_img(os.path.join(path, f), target_size=size)
+        img = img_to_array(img)
+        img = (img / 127.5) - 1.0
+        files.append(img)
+    return np.array(files)
+
+print("Loading horse2zebra dataset...")
+A = load_images("/kaggle/input/horse2zebra-dataset/trainA")   # horses
+B = load_images("/kaggle/input/horse2zebra-dataset/trainB")   # zebras
+
+print("Shape A:", A.shape)
+print("Shape B:", B.shape)
+
+image_shape = (28, 28, 3)
+
+
+
+
+
+dA = define_discriminator(image_shape)
+dB = define_discriminator(image_shape)
+
+gA2B = define_generator(image_shape)
+gB2A = define_generator(image_shape)
+
+cA = define_composite_model(gA2B, dB, gB2A, image_shape)
+cB = define_composite_model(gB2A, dA, gA2B, image_shape)
+
+# ======================================================================
+#                          TRAINING LOOP
+# ======================================================================
+
+epochs = 2
+batch_size = 1
+steps = min(len(A), len(B))
+print(steps)
+
+for epoch in range(epochs):
+    for i in range(steps):
+
+        # Real samples
+        realA = A[i:i+1]
+        realB = B[i:i+1]
+
+        # Generate fake
+        print(realA.shape)
+        print(realB.shape)
+        fakeB = gA2B.predict(realA)
+        fakeA = gB2A.predict(realB)
+
+        # Real labels = 1, Fake = 0
+        y_real = np.ones((1,) + dA.output_shape[1:])
+        y_fake = np.zeros((1,) + dA.output_shape[1:])
+
+        # Train discriminators
+        dA_loss_real = dA.train_on_batch(realA, y_real)
+        dA_loss_fake = dA.train_on_batch(fakeA, y_fake)
+        dB_loss_real = dB.train_on_batch(realB, y_real)
+        dB_loss_fake = dB.train_on_batch(fakeB, y_fake)
+
+        # Train generators (cycle losses)
+        g_loss_A = cA.train_on_batch([realA, realA], 
+                                     [y_real, realA, realA, realA])
+        g_loss_B = cB.train_on_batch([realB, realB], 
+                                     [y_real, realB, realB, realB])
+
+    print(f"Epoch {epoch+1}/{epochs} completed.")
+
+print("Training Finished.")
+
+import matplotlib.pyplot as plt
+
+# -----------------------------------------------------------
+# TEST GENERATOR AFTER TRAINING
+# -----------------------------------------------------------
+
+# Take first 3 images from dataset A (dummy images)
+test_images = A[:3]
+
+# Generate fake images (A → B)
+generated_images = gA2B.predict(test_images)
+
+# Visualize original and generated images
+for i in range(len(test_images)):
+    plt.figure(figsize=(4,2))
+    
+    # Original image
+    plt.subplot(1,2,1)
+    plt.title("Original A")
+    plt.imshow((test_images[i] + 1)/2)  # scale back to [0,1] for visualization
+    plt.axis('off')
+    
+    # Generated image
+    plt.subplot(1,2,2)
+    plt.title("Generated B")
+    plt.imshow((generated_images[i] + 1)/2)
+    plt.axis('off')
+    
+    plt.show()
