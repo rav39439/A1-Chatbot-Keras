@@ -1,0 +1,318 @@
+import tensorflow as tf
+from tensorflow.keras.layers import *
+from tensorflow.keras.models import Model
+import matplotlib.pyplot as plt
+
+
+#########################################################################
+# RESIDUAL BLOCK
+#########################################################################
+
+def res_block(ip):
+    res = Conv2D(64, (3,3), padding="same")(ip)
+    res = BatchNormalization(momentum=0.5)(res)
+    res = PReLU(shared_axes=[1,2])(res)
+
+    res = Conv2D(64, (3,3), padding="same")(res)
+    res = BatchNormalization(momentum=0.5)(res)
+
+    return add([ip, res])
+
+
+#########################################################################
+# UPSCALE BLOCK
+#########################################################################
+
+def upscale_block(ip):
+    up = Conv2D(256, (3,3), padding="same")(ip)
+    up = UpSampling2D(size=2)(up)
+    up = PReLU(shared_axes=[1,2])(up)
+    return up
+
+
+#########################################################################
+# GENERATOR FOR MNIST SUPER-RESOLUTION
+# INPUT: 28×28×1 → OUTPUT: 56×56×1
+#########################################################################
+
+# def create_gen_mnist(num_res_blocks=4):
+
+#     gen_ip = Input(shape=(28, 28, 1))  # Low-resolution MNIST
+
+#     x = Conv2D(64, (9,9), padding="same")(gen_ip)
+#     x = PReLU(shared_axes=[1,2])(x)
+
+#     skip = x
+
+#     # Residual blocks
+#     for _ in range(num_res_blocks):
+#         x = res_block(x)
+
+#     x = Conv2D(64, (3,3), padding="same")(x)
+#     x = BatchNormalization(momentum=0.5)(x)
+#     x = add([x, skip])
+
+#     # UPSCALE: 28 → 56
+#     x = upscale_block(x)
+
+#     # Final high-resolution output
+#     out = Conv2D(1, (9,9), padding="same", activation="tanh")(x)
+
+#     return Model(gen_ip, out)
+
+def create_gen_mnist(num_res_block=4):
+    gen_ip = Input(shape=(14, 14, 1))  # LR input
+
+    layers = Conv2D(64, (9,9), padding="same")(gen_ip)
+    layers = PReLU(shared_axes=[1,2])(layers)
+
+    temp = layers
+
+    # Residual blocks
+    for _ in range(num_res_block):
+        layers = res_block(layers)
+
+    layers = Conv2D(64, (3,3), padding="same")(layers)
+    layers = BatchNormalization(momentum=0.5)(layers)
+    layers = add([layers, temp])
+
+    # Upscale once → 14→28
+    layers = upscale_block(layers)
+
+    # Conv after upscale
+    layers = Conv2D(64, (3,3), padding="same")(layers)
+    layers = PReLU(shared_axes=[1,2])(layers)
+
+    out = Conv2D(1, (9,9), padding="same", activation="tanh")(layers)
+
+    return Model(gen_ip, out)
+
+
+#########################################################################
+# DISCRIMINATOR FOR 56×56×1 IMAGES
+#########################################################################
+
+def discriminator_block(ip, filters, strides=1, bn=True):
+    d = Conv2D(filters, (3,3), strides=strides, padding="same")(ip)
+    if bn:
+        d = BatchNormalization(momentum=0.8)(d)
+    d = LeakyReLU(alpha=0.2)(d)
+    return d
+
+def create_disc_mnist():
+    disc_ip = Input(shape=(28, 28, 1))   # High-resolution input for MNIST
+    df = 64
+
+    # Reduce downsampling for small MNIST images
+    d1 = discriminator_block(disc_ip, df, bn=False)
+    d2 = discriminator_block(d1, df, strides=1)   # Keep stride 1
+    d3 = discriminator_block(d2, df*2, strides=2) # Downsample
+    d4 = discriminator_block(d3, df*2, strides=1)
+    d5 = discriminator_block(d4, df*4, strides=2)
+    d6 = discriminator_block(d5, df*4, strides=1)
+    d7 = discriminator_block(d6, df*8, strides=2)
+    d8 = discriminator_block(d7, df*8, strides=1)
+
+    flat = Flatten()(d8)
+    dense = Dense(df*16)(flat)
+    dense = LeakyReLU(alpha=0.2)(dense)
+
+    validity = Dense(1, activation="sigmoid")(dense)
+
+    return Model(disc_ip, validity)
+
+########################################################################
+# CREATE AND TEST MODELS
+#########################################################################
+
+gen = create_gen_mnist()
+disc = create_disc_mnist()
+
+print("GENERATOR SUMMARY:")
+gen.summary()
+
+print("\nDISCRIMINATOR SUMMARY:")
+disc.summary()
+
+# --------------------------------------------------------
+# TEST GENERATOR WITH RANDOM LOW-RESOLUTION IMAGES
+# --------------------------------------------------------
+lr = tf.random.normal((2, 14, 14, 1))  # Correct: match generator input
+sr = gen(lr)
+
+print("\nGenerated SR Image Shape:", sr.shape)
+
+# --------------------------------------------------------
+# TEST DISCRIMINATOR
+# --------------------------------------------------------
+disc_out = disc(sr)
+print("Discriminator Output:", disc_out.numpy())
+
+# --------------------------------------------------------
+# VISUALIZE SUPER-RESOLUTION RESULTS
+# --------------------------------------------------------
+sr = (sr.numpy() + 1) / 2  # [-1,1] → [0,1]
+
+plt.figure(figsize=(6,3))
+
+for i in range(2):
+    plt.subplot(1,2,i+1)
+    plt.imshow(sr[i,:,:,0], cmap="gray")
+    plt.title("Generated 56×56 SR Image")
+    plt.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+
+
+import pandas as pd
+import tensorflow as tf
+
+# -----------------------------
+# Load train.csv
+# -----------------------------
+train_csv_path = "/kaggle/input/digit-recognizer/train.csv"
+test_csv_path  = "/kaggle/input/digit-recognizer/test.csv"
+
+# Read CSV
+train_df = pd.read_csv(train_csv_path)
+test_df  = pd.read_csv(test_csv_path)
+
+# -----------------------------
+# Extract image data (ignore labels)
+# -----------------------------
+x_train = train_df.drop("label", axis=1).values.astype("float32")
+x_test  = test_df.values.astype("float32")  # test.csv has no label
+
+# Reshape to (N,28,28,1)
+x_train = x_train.reshape(-1, 28, 28, 1)
+x_test  = x_test.reshape(-1, 28, 28, 1)
+
+# Normalize to [-1,1]
+x_train = (x_train / 127.5) - 1
+x_test  = (x_test / 127.5) - 1
+
+
+
+import numpy as np
+from tqdm import tqdm
+
+batch_size = 32
+epochs = 2
+
+train_dataset = tf.data.Dataset.from_tensor_slices((x_train_lr, x_train))
+train_dataset = train_dataset.shuffle(60000).batch(batch_size)
+
+for epoch in range(epochs):
+    loop = tqdm(train_dataset, desc=f"Epoch {epoch+1}/{epochs}")
+    for lr_imgs, hr_imgs in loop:
+        d_loss, g_loss = train_step(lr_imgs, hr_imgs)
+        loop.set_postfix(D_loss=d_loss.numpy(), G_loss=g_loss.numpy())
+
+    # Optional: generate sample images
+    if (epoch+1) % 2 == 0:
+        sample_lr = x_test_lr[:5]
+        sr_sample = gen(sample_lr, training=False)
+        sr_sample = (sr_sample.numpy() + 1)/2  # [-1,1] -> [0,1]
+
+        plt.figure(figsize=(10,2))
+        for i in range(5):
+            plt.subplot(1,5,i+1)
+            plt.imshow(sr_sample[i,:,:,0], cmap='gray')
+            plt.axis('off')
+        plt.show()
+
+
+import matplotlib.pyplot as plt
+import tensorflow as tf
+
+# Pick a few LR demo images from test set
+demo_lr = x_test_lr[:5]  # shape: (5, 14, 14, 1)
+
+# Generate SR images using trained generator
+sr_demo = gen(demo_lr, training=False)
+sr_demo = (sr_demo.numpy() + 1) / 2  # [-1,1] -> [0,1] for visualization
+
+# Visualize LR and SR images side by side
+plt.figure(figsize=(12,4))
+for i in range(5):
+    # Low-resolution input
+    plt.subplot(2,5,i+1)
+    plt.imshow(tf.image.resize(demo_lr[i], [28,28])[:,:,0], cmap='gray')
+    plt.title("LR")
+    plt.axis("off")
+
+    # Super-resolved output
+    plt.subplot(2,5,i+6)
+    plt.imshow(sr_demo[i,:,:,0], cmap='gray')
+    plt.title("SR")
+    plt.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# -----------------------------
+# Create low-resolution images
+# -----------------------------
+lr_scale = 0.5  # 28x28 -> 14x14
+x_train_lr = tf.image.resize(x_train, [int(28*lr_scale), int(28*lr_scale)])
+x_test_lr  = tf.image.resize(x_test,  [int(28*lr_scale), int(28*lr_scale)])
+
+print("HR images shape:", x_train.shape)
+print("LR images shape:", x_train_lr.shape)
+
+
+
+
+# Losses
+bce = tf.keras.losses.BinaryCrossentropy(from_logits=False)  # for discriminator
+mse = tf.keras.losses.MeanSquaredError()  # for generator content loss
+
+# Optimizers
+gen_opt = tf.keras.optimizers.Adam(1e-4, beta_1=0.9)
+disc_opt = tf.keras.optimizers.Adam(1e-4, beta_1=0.9)
+
+@tf.function
+def train_step(lr_imgs, hr_imgs):
+    print(lr_imgs.shape)
+    print(hr_imgs.shape)
+    batch_size = tf.shape(lr_imgs)[0]
+
+    # Labels
+    real_labels = tf.ones((batch_size,1))
+    fake_labels = tf.zeros((batch_size,1))
+
+    # -------------------
+    # Train Discriminator
+    # -------------------
+    with tf.GradientTape() as disc_tape:
+        sr_imgs = gen(lr_imgs, training=True)
+        d_real = disc(hr_imgs, training=True)
+        d_fake = disc(sr_imgs, training=True)
+
+        d_loss_real = bce(real_labels, d_real)
+        d_loss_fake = bce(fake_labels, d_fake)
+        d_loss = d_loss_real + d_loss_fake
+
+    grads = disc_tape.gradient(d_loss, disc.trainable_variables)
+    disc_opt.apply_gradients(zip(grads, disc.trainable_variables))
+
+    # -------------------
+    # Train Generator
+    # -------------------
+    with tf.GradientTape() as gen_tape:
+        sr_imgs = gen(lr_imgs, training=True)
+        d_fake = disc(sr_imgs, training=False)  # Freeze discriminator
+
+        # Generator loss = content + adversarial
+        content_loss = mse(hr_imgs, sr_imgs)
+        adv_loss = bce(real_labels, d_fake)
+        g_loss = content_loss + 1e-3 * adv_loss
+
+    grads = gen_tape.gradient(g_loss, gen.trainable_variables)
+    gen_opt.apply_gradients(zip(grads, gen.trainable_variables))
+
+    return d_loss, g_loss
