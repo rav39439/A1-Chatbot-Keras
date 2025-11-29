@@ -6,11 +6,15 @@ import torch
 import torch.nn as nn
 import functools
 
+# --------------------------
+# DEVICE
+# --------------------------
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
 
-###############################################
+##############################################
 # Helper: Convolution Block
 ###############################################
-
 def conv_block(in_channels, out_channels, kernel_size, stride, padding, norm=True):
     layers = [nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, bias=not norm)]
     if norm:
@@ -18,15 +22,12 @@ def conv_block(in_channels, out_channels, kernel_size, stride, padding, norm=Tru
     layers.append(nn.ReLU(inplace=True))
     return nn.Sequential(*layers)
 
-
 ###############################################
 # ResNet Block
 ###############################################
-
 class ResnetBlock(nn.Module):
     def __init__(self, dim):
         super().__init__()
-
         self.block = nn.Sequential(
             nn.ReflectionPad2d(1),
             nn.Conv2d(dim, dim, kernel_size=3, padding=0),
@@ -41,13 +42,11 @@ class ResnetBlock(nn.Module):
     def forward(self, x):
         return x + self.block(x)  # skip connection
 
-
-###############################################
+##############################################
 # Generator: ResNet-based
 ###############################################
-
 class ResnetGenerator(nn.Module):
-    def __init__(self, input_nc=3, output_nc=3, ngf=64, n_blocks=9):
+    def __init__(self, input_nc=3, output_nc=3, ngf=64, n_blocks=6):
         super().__init__()
 
         # --- Encoder ---
@@ -58,7 +57,7 @@ class ResnetGenerator(nn.Module):
             nn.ReLU(True)
         ]
 
-        # Downsampling (3 → 64 → 128 → 256)
+        # Downsampling
         n_downsampling = 2
         for i in range(n_downsampling):
             mult = 2 ** i
@@ -68,12 +67,12 @@ class ResnetGenerator(nn.Module):
                 nn.ReLU(True)
             ]
 
-        # --- Transformer section: 9 ResNet blocks ---
+        # Transformer section: ResNet blocks
         mult = 2 ** n_downsampling
         for _ in range(n_blocks):
             model += [ResnetBlock(ngf * mult)]
 
-        # --- Decoder ---
+        # Decoder
         for i in range(n_downsampling):
             mult = 2 ** (n_downsampling - i)
             model += [
@@ -96,37 +95,30 @@ class ResnetGenerator(nn.Module):
     def forward(self, x):
         return self.model(x)
 
-
 ###############################################
 # 70x70 PatchGAN Discriminator
 ###############################################
-
 class NLayerDiscriminator(nn.Module):
     def __init__(self, input_nc=3, ndf=64, n_layers=3):
         super().__init__()
-
         kw = 4
         padw = 1
 
-        # First layer: no normalization
         sequence = [
             nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw),
             nn.LeakyReLU(0.2, True)
         ]
 
-        # Middle layers
         nf_mult = 1
         for n in range(1, n_layers):
             nf_mult_prev = nf_mult
             nf_mult = min(2 ** n, 8)
             sequence += [
-                nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult,
-                          kernel_size=kw, stride=2, padding=padw),
+                nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=2, padding=padw),
                 nn.InstanceNorm2d(ndf * nf_mult),
                 nn.LeakyReLU(0.2, True)
             ]
 
-        # Final layer with stride=1 (70×70 patch)
         sequence += [
             nn.Conv2d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw)
         ]
@@ -136,15 +128,14 @@ class NLayerDiscriminator(nn.Module):
     def forward(self, x):
         return self.model(x)
 
-
 ###############################################
-# Instantiate CycleGAN Models
+# Instantiate models and move to device
 ###############################################
+G = ResnetGenerator().to(device)
+D = NLayerDiscriminator().to(device)
 
-G = ResnetGenerator()
-D = NLayerDiscriminator()
-
-x = torch.randn(1, 3, 256, 256)
+# Demo input tensor on device
+x = torch.randn(1, 3, 256, 256, device=device)
 
 fake = G(x)
 disc = D(x)
@@ -159,10 +150,15 @@ print("Discriminator output shape:", disc.shape)
 import torch
 import torch.nn as nn
 
+# --------------------------
+# DEVICE
+# --------------------------
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
+
 ###################################################
 # LSGAN Loss (Least Squares GAN)
 ###################################################
-
 class LSGANLoss(nn.Module):
     def __init__(self):
         super().__init__()
@@ -170,13 +166,83 @@ class LSGANLoss(nn.Module):
 
     def __call__(self, prediction, target_is_real):
         """target_is_real = True or False"""
-        target = torch.ones_like(prediction) if target_is_real else torch.zeros_like(prediction)
+        target = torch.ones_like(prediction, device=prediction.device) if target_is_real else torch.zeros_like(prediction, device=prediction.device)
         return self.loss(prediction, target)
 
 
 ###################################################
 # CycleGAN Loss Wrapper
 ###################################################
+# class CycleGANLoss:
+#     def __init__(self, lambda_cycle=10.0, lambda_identity=5.0):
+#         self.adv_loss = LSGANLoss()
+#         self.cycle_loss_fn = nn.L1Loss()
+#         self.id_loss_fn = nn.L1Loss()
+
+#         self.lambda_cycle = lambda_cycle
+#         self.lambda_identity = lambda_identity
+
+#     def generator_loss(self, G, F, D_A, D_B, real_A, real_B):
+#         ############################
+#         # Adversarial Loss
+#         ############################
+#         fake_B = G(real_A)
+#         pred_fake_B = D_B(fake_B)
+#         loss_G_adv = self.adv_loss(pred_fake_B, True)
+
+#         fake_A = F(real_B)
+#         pred_fake_A = D_A(fake_A)
+#         loss_F_adv = self.adv_loss(pred_fake_A, True)
+
+#         ############################
+#         # Cycle Consistency Loss
+#         ############################
+#         rec_A = F(fake_B)
+#         loss_cycle_A = self.cycle_loss_fn(rec_A, real_A)
+
+#         rec_B = G(fake_A)
+#         loss_cycle_B = self.cycle_loss_fn(rec_B, real_B)
+
+#         loss_cycle = loss_cycle_A + loss_cycle_B
+
+#         ############################
+#         # Identity Loss
+#         ############################
+       
+#         with torch.no_grad():
+#             id_B = G(real_B)
+#             id_A = F(real_A)
+
+#         loss_id_B = self.id_loss_fn(id_B, real_B)
+#         loss_id_A = self.id_loss_fn(id_A, real_A)
+#         loss_id = loss_id_A + loss_id_B
+
+#         ############################
+#         # Total Generator Loss
+#         ############################
+#         total_loss = (
+#             loss_G_adv +
+#             loss_F_adv +
+#             self.lambda_cycle * loss_cycle +
+#             self.lambda_identity * loss_id
+#         )
+
+#         return total_loss, {
+#             "G_adv": loss_G_adv.item(),
+#             "F_adv": loss_F_adv.item(),
+#             "cycle": loss_cycle.item(),
+#             "id": loss_id.item(),
+#             "total": total_loss.item()
+#         }
+
+#     def discriminator_loss(self, D, real, fake):
+#         pred_real = D(real)
+#         loss_real = self.adv_loss(pred_real, True)
+
+#         pred_fake = D(fake.detach())
+#         loss_fake = self.adv_loss(pred_fake, False)
+
+#         return (loss_real + loss_fake) * 0.5
 
 class CycleGANLoss:
     def __init__(self, lambda_cycle=10.0, lambda_identity=5.0):
@@ -188,23 +254,13 @@ class CycleGANLoss:
         self.lambda_identity = lambda_identity
 
     def generator_loss(self, G, F, D_A, D_B, real_A, real_B):
-        """
-        Computes total generator loss:
-        - Adversarial loss
-        - Cycle consistency loss
-        - Identity loss
-        """
-
         ############################
         # Adversarial Loss
         ############################
-
-        # G: A -> B (try to fool D_B)
         fake_B = G(real_A)
         pred_fake_B = D_B(fake_B)
         loss_G_adv = self.adv_loss(pred_fake_B, True)
 
-        # F: B -> A (try to fool D_A)
         fake_A = F(real_B)
         pred_fake_A = D_A(fake_A)
         loss_F_adv = self.adv_loss(pred_fake_A, True)
@@ -212,35 +268,30 @@ class CycleGANLoss:
         ############################
         # Cycle Consistency Loss
         ############################
-
-        # A -> B -> A
-        rec_A = F(fake_B)
+        # IMPORTANT FIXES:
+        # detach BOTH fake_A and fake_B before feeding into cycle
+        rec_A = F(fake_B.detach())     # FIXED
         loss_cycle_A = self.cycle_loss_fn(rec_A, real_A)
 
-        # B -> A -> B
-        rec_B = G(fake_A)
+        rec_B = G(fake_A.detach())     # FIXED
         loss_cycle_B = self.cycle_loss_fn(rec_B, real_B)
 
         loss_cycle = loss_cycle_A + loss_cycle_B
 
         ############################
-        # Identity Loss
-        ############################
+        # Identity Loss (no grad)
+        ############################        
+        with torch.no_grad():
+            id_B = G(real_B)
+            id_A = F(real_A)
 
-        # G(B) ≈ B
-        id_B = G(real_B)
         loss_id_B = self.id_loss_fn(id_B, real_B)
-
-        # F(A) ≈ A
-        id_A = F(real_A)
         loss_id_A = self.id_loss_fn(id_A, real_A)
-
         loss_id = loss_id_A + loss_id_B
 
         ############################
         # Total Generator Loss
         ############################
-
         total_loss = (
             loss_G_adv +
             loss_F_adv +
@@ -257,9 +308,6 @@ class CycleGANLoss:
         }
 
     def discriminator_loss(self, D, real, fake):
-        """
-        Computes LSGAN discriminator loss.
-        """
         pred_real = D(real)
         loss_real = self.adv_loss(pred_real, True)
 
@@ -269,25 +317,40 @@ class CycleGANLoss:
         return (loss_real + loss_fake) * 0.5
 
 
-G = ResnetGenerator()
-F = ResnetGenerator()
-D_A = NLayerDiscriminator()
-D_B = NLayerDiscriminator()
+# --------------------------
+# MODELS ON DEVICE
+# --------------------------
+G = ResnetGenerator().to(device)
+F = ResnetGenerator().to(device)
+D_A = NLayerDiscriminator().to(device)
+D_B = NLayerDiscriminator().to(device)
+
 loss_fn = CycleGANLoss()
 
-real_A = torch.randn(1, 3, 256, 256)
-real_B = torch.randn(1, 3, 256, 256)
+# --------------------------
+# DEMO INPUTS ON DEVICE
+# --------------------------
+real_A = torch.randn(1, 3, 256, 256, device=device)
+real_B = torch.randn(1, 3, 256, 256, device=device)
 
-# Generator Loss
+# --------------------------
+# GENERATOR LOSS
+# --------------------------
 G_loss, G_logs = loss_fn.generator_loss(G, F, D_A, D_B, real_A, real_B)
 print("Generator Loss:", G_loss.item())
 print(G_logs)
-# Discriminator Losses
+
+# --------------------------
+# DISCRIMINATOR LOSSES
+# --------------------------
 fake_A = F(real_B)
 fake_B = G(real_A)
-print("D_A Loss:", loss_fn.discriminator_loss(D_A, real_A, fake_A).item())
-print("D_B Loss:", loss_fn.discriminator_loss(D_B, real_B, fake_B).item())
 
+D_A_loss = loss_fn.discriminator_loss(D_A, real_A, fake_A)
+D_B_loss = loss_fn.discriminator_loss(D_B, real_B, fake_B)
+
+print("D_A Loss:", D_A_loss.item())
+print("D_B Loss:", D_B_loss.item())
 
 
 
@@ -304,19 +367,25 @@ import torch.nn as nn
 import torch.optim as optim
 
 # --------------------------
+# DEVICE
+# --------------------------
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
+
+# --------------------------
 # STEP 2: Models
 # --------------------------
-# (Assume ResnetGenerator and NLayerDiscriminator classes are already defined as in Step 2)
+# (Assume ResnetGenerator and NLayerDiscriminator classes are already defined)
 
-G = ResnetGenerator()
-F = ResnetGenerator()
-D_A = NLayerDiscriminator()
-D_B = NLayerDiscriminator()
+G = ResnetGenerator().to(device)
+F = ResnetGenerator().to(device)
+D_A = NLayerDiscriminator().to(device)
+D_B = NLayerDiscriminator().to(device)
 
 # --------------------------
 # STEP 3: Losses
 # --------------------------
-# (Assume CycleGANLoss class is already defined as in Step 3)
+# (Assume CycleGANLoss class is already defined)
 loss_fn = CycleGANLoss()
 
 # --------------------------
@@ -343,10 +412,10 @@ scheduler_D_A = optim.lr_scheduler.LambdaLR(optimizer_D_A, lr_lambda=lambda_lr)
 scheduler_D_B = optim.lr_scheduler.LambdaLR(optimizer_D_B, lr_lambda=lambda_lr)
 
 # --------------------------
-# DEMO INPUTS (small batch)
+# DEMO INPUTS (small batch) ON DEVICE
 # --------------------------
-real_A = torch.randn(2, 3, 256, 256)  # batch of 2
-real_B = torch.randn(2, 3, 256, 256)
+real_A = torch.randn(2, 3, 256, 256).to(device)  # batch of 2
+real_B = torch.randn(2, 3, 256, 256).to(device)
 
 # --------------------------
 # SINGLE TRAINING STEP
@@ -355,19 +424,24 @@ real_B = torch.randn(2, 3, 256, 256)
 # -- Generators update --
 optimizer_G.zero_grad()
 G_loss, G_logs = loss_fn.generator_loss(G, F, D_A, D_B, real_A, real_B)
+G_loss = G_loss.to(device)  # ensure loss is on same device
 G_loss.backward()
 optimizer_G.step()
 
 # -- Discriminators update --
 optimizer_D_A.zero_grad()
 fake_A = F(real_B)
+fake_A = fake_A.to(device)
 D_A_loss = loss_fn.discriminator_loss(D_A, real_A, fake_A)
+D_A_loss = D_A_loss.to(device)
 D_A_loss.backward()
 optimizer_D_A.step()
 
 optimizer_D_B.zero_grad()
 fake_B = G(real_A)
+fake_B = fake_B.to(device)
 D_B_loss = loss_fn.discriminator_loss(D_B, real_B, fake_B)
+D_B_loss = D_B_loss.to(device)
 D_B_loss.backward()
 optimizer_D_B.step()
 
@@ -396,9 +470,10 @@ import torch
 
 class ImagePool:
     """This class implements an image buffer that stores previously generated images."""
-    def __init__(self, pool_size=50):
+    def __init__(self, pool_size=50, device='cpu'):
         self.pool_size = pool_size
         self.images = []
+        self.device = device
 
     def query(self, images):
         """
@@ -407,7 +482,7 @@ class ImagePool:
         """
         return_images = []
         for img in images:
-            img = img.unsqueeze(0)
+            img = img.unsqueeze(0).to(self.device)  # ensure image is on correct device
             if len(self.images) < self.pool_size:
                 # Fill pool until full
                 self.images.append(img)
@@ -416,7 +491,7 @@ class ImagePool:
                 if random.random() > 0.5:
                     # Use old image from pool
                     idx = random.randint(0, self.pool_size - 1)
-                    tmp = self.images[idx].clone()
+                    tmp = self.images[idx].clone().to(self.device)
                     self.images[idx] = img
                     return_images.append(tmp)
                 else:
@@ -424,27 +499,28 @@ class ImagePool:
                     return_images.append(img)
         return torch.cat(return_images, dim=0)
 
-fake_A_pool = ImagePool(pool_size=50)
-fake_B_pool = ImagePool(pool_size=50)
+# --------------------------
+# Create pools on the same device as models
+# --------------------------
+fake_A_pool = ImagePool(pool_size=50, device=device)
+fake_B_pool = ImagePool(pool_size=50, device=device)
+
+# --------------------------
 # Generate new fake images
-fake_A = F(real_B)
+# --------------------------
+fake_A = F(real_B)  # already on device
 fake_B = G(real_A)
 
 # Use image buffer for discriminator
 fake_A_buffer = fake_A_pool.query(fake_A)
 fake_B_buffer = fake_B_pool.query(fake_B)
 
+# --------------------------
 # Discriminator updates
+# --------------------------
 optimizer_D_A.zero_grad()
 D_A_loss = loss_fn.discriminator_loss(D_A, real_A, fake_A_buffer)
-D_A_loss.backward()
-optimizer_D_A.step()
-
-optimizer_D_B.zero_grad()
-D_B_loss = loss_fn.discriminator_loss(D_B, real_B, fake_B_buffer)
-D_B_loss.backward()
-optimizer_D_B.step()
-
+D_A_loss = D_A_loss.to(device)  # ensure loss is on corre
 
 --------------------------------------
 
@@ -457,22 +533,25 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from PIL import Image
 import os
+import matplotlib.pyplot as plt
 
 # --------------------------
 # Hyperparameters
-# --------------------------
-n_epochs_demo = 1
+# -------------------------
+n_epochs_demo = 35
 batch_size = 2
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-image_size = 256
+image_size = 128
 
 # --------------------------
-# Custom Dataset
+# Custom Dataset (return tensors directly on device)
 # --------------------------
 class ImageFolderDataset(Dataset):
-    def __init__(self, root_dir, transform=None):
-        self.files = sorted([os.path.join(root_dir, f) for f in os.listdir(root_dir) if f.endswith(".jpg") or f.endswith(".png")])
+    def __init__(self, root_dir, transform=None, device='cpu'):
+        self.files = sorted([os.path.join(root_dir, f) for f in os.listdir(root_dir) 
+                             if f.endswith(".jpg") or f.endswith(".png")])
         self.transform = transform
+        self.device = device
 
     def __len__(self):
         return len(self.files)
@@ -481,25 +560,29 @@ class ImageFolderDataset(Dataset):
         img = Image.open(self.files[idx]).convert('RGB')
         if self.transform:
             img = self.transform(img)
-        return img
+        return img.to(self.device)  # directly move to device
 
+# --------------------------
 # Transforms
+# --------------------------
 transform = transforms.Compose([
     transforms.Resize((image_size, image_size)),
     transforms.ToTensor(),
     transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5))
 ])
 
+# --------------------------
 # Load datasets
+# --------------------------
 trainA_dir = "/kaggle/input/horse2zebra-dataset/trainA"
 trainB_dir = "/kaggle/input/horse2zebra-dataset/trainB"
 testA_dir = "/kaggle/input/horse2zebra-dataset/testA"
 testB_dir = "/kaggle/input/horse2zebra-dataset/testB"
 
-trainA_dataset = ImageFolderDataset(trainA_dir, transform)
-trainB_dataset = ImageFolderDataset(trainB_dir, transform)
-testA_dataset = ImageFolderDataset(testA_dir, transform)
-testB_dataset = ImageFolderDataset(testB_dir, transform)
+trainA_dataset = ImageFolderDataset(trainA_dir, transform, device=device)
+trainB_dataset = ImageFolderDataset(trainB_dir, transform, device=device)
+testA_dataset = ImageFolderDataset(testA_dir, transform, device=device)
+testB_dataset = ImageFolderDataset(testB_dir, transform, device=device)
 
 train_loader = list(zip(DataLoader(trainA_dataset, batch_size=batch_size, shuffle=True),
                         DataLoader(trainB_dataset, batch_size=batch_size, shuffle=True)))
@@ -513,20 +596,49 @@ D_A.to(device)
 D_B.to(device)
 
 # --------------------------
-# Step 6: Image Buffers
+# Step 6: Image Buffers (ensure buffer tensors are on correct device)
 # --------------------------
-fake_A_pool = ImagePool(pool_size=50)
-fake_B_pool = ImagePool(pool_size=50)
+class ImagePool:
+    def __init__(self, pool_size=50, device='cpu'):
+        self.pool_size = pool_size
+        self.images = []
+        self.device = device
+
+    def query(self, images):
+        return_images = []
+        for img in images:
+            img = img.unsqueeze(0).to(self.device)
+            if len(self.images) < self.pool_size:
+                self.images.append(img)
+                return_images.append(img)
+            else:
+                if torch.rand(1).item() > 0.5:
+                    idx = torch.randint(0, self.pool_size, (1,)).item()
+                    tmp = self.images[idx].clone()
+                    self.images[idx] = img
+                    return_images.append(tmp)
+                else:
+                    return_images.append(img)
+        return torch.cat(return_images, dim=0)
+
+fake_A_pool = ImagePool(pool_size=50, device=device)
+fake_B_pool = ImagePool(pool_size=50, device=device)
 
 # --------------------------
 # TRAINING LOOP
 # --------------------------
 for epoch in range(n_epochs_demo):
     print(f"Epoch [{epoch+1}/{n_epochs_demo}]")
+    epoch_G, epoch_D_A, epoch_D_B = 0.0, 0.0, 0.0
+    num_batches = 0
+
+
     
     for (real_A_batch, real_B_batch) in train_loader:
-        real_A = real_A_batch.to(device)
-        real_B = real_B_batch.to(device)
+        num_batches += 1
+
+        real_A = real_A_batch  # already on device
+        real_B = real_B_batch
 
         # ---- Train Generators ----
         optimizer_G.zero_grad()
@@ -540,19 +652,25 @@ for epoch in range(n_epochs_demo):
         fake_A_buffer = fake_A_pool.query(fake_A)
         fake_B_buffer = fake_B_pool.query(fake_B)
 
-        # D_A update
         optimizer_D_A.zero_grad()
         D_A_loss = loss_fn.discriminator_loss(D_A, real_A, fake_A_buffer)
         D_A_loss.backward()
         optimizer_D_A.step()
 
-        # D_B update
         optimizer_D_B.zero_grad()
         D_B_loss = loss_fn.discriminator_loss(D_B, real_B, fake_B_buffer)
         D_B_loss.backward()
         optimizer_D_B.step()
+        epoch_G += G_loss.item()
+        epoch_D_A += D_A_loss.item()
+        epoch_D_B += D_B_loss.item()
 
-        print(f"G_loss={G_loss.item():.4f}, D_A_loss={D_A_loss.item():.4f}, D_B_loss={D_B_loss.item():.4f}")
+        # print(f"G_loss={G_loss.item():.4f}, D_A_loss={D_A_loss.item():.4f}, D_B_loss={D_B_loss.item():.4f}")
+    print(f"Epoch {epoch+1} Summary:")
+    print(f"  Avg G_loss:   {epoch_G / num_batches:.4f}")
+    print(f"  Avg D_A_loss: {epoch_D_A / num_batches:.4f}")
+    print(f"  Avg D_B_loss: {epoch_D_B / num_batches:.4f}")
+
 
     scheduler_G.step()
     scheduler_D_A.step()
@@ -574,14 +692,11 @@ print("Model weights saved!")
 def denormalize(tensor):
     return (tensor * 0.5 + 0.5).clamp(0,1)
 
-import matplotlib.pyplot as plt
-
 G.eval()
 F.eval()
 
 with torch.no_grad():
-    demo_imgs = [testA_dataset[0], testA_dataset[1]]
-    demo_imgs = torch.stack(demo_imgs).to(device)
+    demo_imgs = torch.stack([testA_dataset[0], testA_dataset[1]]).to(device)
     fake_B = G(demo_imgs)
 
     for i in range(len(demo_imgs)):
@@ -598,8 +713,8 @@ with torch.no_grad():
         plt.imshow(fake_img)
         plt.title("Fake B")
         plt.axis('off')
-
         plt.show()
+
 -----------------------------------
 
 
