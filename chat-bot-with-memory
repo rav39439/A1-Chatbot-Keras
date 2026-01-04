@@ -1,0 +1,35 @@
+
+from langchain_ollama import ChatOllama
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+
+# Initialize LLM
+llm = ChatOllama(model="llama3.2")
+
+# Conversation memory (THIS is the key)
+conversation_history = [
+    SystemMessage(
+        content="You are a helpful assistant. Use previous questions and answers as context."
+    )
+]
+
+print("🤖 Simple Chatbot with Memory (type 'exit' to quit)\n")
+
+while True:
+    user_input = input("You: ")
+
+    if user_input.lower() in ["exit", "quit"]:
+        print("Goodbye 👋")
+        break
+
+    # Add user message to memory
+    conversation_history.append(HumanMessage(content=user_input))
+
+    # Invoke LLM with FULL HISTORY
+    response = llm.invoke(conversation_history)
+
+    # Add AI response to memory
+    conversation_history.append(AIMessage(content=response.content))
+
+    # Print response
+    print("\nAI:", response.content)
+    print("-" * 60)
