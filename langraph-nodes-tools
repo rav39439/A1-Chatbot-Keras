@@ -414,4 +414,159 @@ Exiting with status code 408."""
 if __name__ == "__main__":
     asyncio.run(main())
 
-    
+
+
+
+#------------------------tools -applicatioin-----------------------
+
+from langchain_ollama import ChatOllama
+from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage, AIMessage,SystemMessage,ToolCall
+from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.graph import StateGraph, START, END
+from pydantic import BaseModel, Field
+from typing import List
+from langgraph.graph.message import add_messages
+from typing import TypedDict,Annotated
+import json
+from langchain.tools import tool
+
+from langchain_core.tools import tool
+
+# 1️⃣ Basic Profit / Loss Tool
+@tool
+def basic_profit_loss(cost_price: float, selling_price: float) -> str:
+    """
+    Solves basic profit or loss problems using Cost Price (CP)
+    and Selling Price (SP).
+
+    Use this tool ONLY if:
+    - You are given the cost price and selling price directly.
+    - There is no discount or successive transaction involved.
+    """
+    print("basic-profit")
+    if selling_price > cost_price:
+        profit = selling_price - cost_price
+        profit_percent = (profit / cost_price) * 100
+        return f"Profit = {profit}\nProfit Percentage = {profit_percent:.2f}%"
+    elif cost_price > selling_price:
+        loss = cost_price - selling_price
+        loss_percent = (loss / cost_price) * 100
+        return f"Loss = {loss}\nLoss Percentage = {loss_percent:.2f}%"
+    else:
+        return "No Profit, No Loss"
+
+
+# 2️⃣ Marked Price & Discount Tool
+@tool
+def discount_profit_loss(cost_price: float, marked_price: float, discount_percent: float) -> str:
+    """
+    Solves problems involving Marked Price (MP), Discount, and Profit or Loss.
+
+    Use this tool ONLY if:
+    - You are given a marked price and discount percentage.
+    - You may also know the cost price.
+    - This is NOT a successive transaction problem.
+    """
+    print("discount-profit")
+    selling_price = marked_price * (1 - discount_percent / 100)
+
+    if selling_price > cost_price:
+        profit = selling_price - cost_price
+        profit_percent = (profit / cost_price) * 100
+        return f"Selling Price = {selling_price}\nProfit = {profit}\nProfit Percentage = {profit_percent:.2f}%"
+    else:
+        loss = cost_price - selling_price
+        loss_percent = (loss / cost_price) * 100
+        return f"Selling Price = {selling_price}\nLoss = {loss}\nLoss Percentage = {loss_percent:.2f}%"
+
+
+# 3️⃣ Successive Profit & Loss Tool
+@tool
+def successive_profit_loss(first_change_percent: float, second_change_percent: float) -> str:
+    """
+    Solves successive profit and loss problems where multiple
+    profit/loss percentages are applied one after another.
+
+    Use this tool ONLY if:
+    - The problem involves two or more consecutive profit/loss percentages.
+    - Example: "First sold at 20% profit, then at 10% loss."
+    """
+    print("successive-profit")
+    net_change = first_change_percent + second_change_percent + (first_change_percent * second_change_percent) / 100
+
+    if net_change > 0:
+        return f"Net Profit = {net_change:.2f}%"
+    elif net_change < 0:
+        return f"Net Loss = {abs(net_change):.2f}%"
+    else:
+        return "No overall Profit or Loss"
+
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+llm = ChatOllama(model="llama3.2")
+llm_with_tools = llm.bind_tools([successive_profit_loss,discount_profit_loss,basic_profit_loss])
+tool_node = ToolNode([successive_profit_loss,discount_profit_loss,basic_profit_loss])
+def llm_step(state: State) -> State:
+    response = llm_with_tools.invoke(state["messages"])
+    state["messages"].append(response)
+    return 
+
+system_prompt = """
+You are an ONTAP defect analysis assistant operating in a restricted tool environment.
+
+Rules:
+1. Use only the provided tools to handle user input.
+2. Do not reason, summarize, or answer directly.
+3. If a tool is applicable, invoke it.
+4. If no tool applies, output exactly:
+   "defect cannot be categorized by using the provided tools"
+5. Never create or assume information outside the available tools.
+"""
+
+# 6️⃣ Build the graph
+graph_builder = StateGraph(State)
+graph_builder.add_node("llm", llm_step)
+graph_builder.add_node("tools", tool_node)
+graph_builder.add_conditional_edges( "llm", tools_condition, "tools")
+graph_builder.add_edge("tools", "llm")
+graph_builder.add_edge(START, "llm")
+
+
+# 7Compile the graph
+app = graph_builder.compile()
+
+# 8️⃣ Initialize and run
+import asyncio
+async def main():
+    user_input = """A shopkeeper buys an article for ₹2,000.
+He sells it at a 20% profit to the first customer. Later, the article is returned, and the shopkeeper sells it again at a 10% loss on the previous selling price. Find the final selling price and profit or loss"""
+
+    config = {"recursion_limit": 20}  # optional, can omit
+   
+    # 👇 The async equivalent of invoke()
+   
+    result = await app.ainvoke({
+    "messages": [
+        SystemMessage(content="You are an math problem solver. Use the correct tool for each problem."),
+        HumanMessage(content=user_input)        # The user’s ONTAP log input
+    ]
+})
+
+    print("\n--- FINAL OUTPUT ---")
+    # print(result["messages"])
+    print(result["messages"])
+    print(result["messages"][-1].content)
+
+
+# 9️⃣ Run it
+if __name__ == "__main__":
+    asyncio.run(main())
+
+
+
+
+
+
+
+
