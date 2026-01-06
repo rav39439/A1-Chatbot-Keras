@@ -1,0 +1,630 @@
+# #-------------------------------------------hadoop----------------------
+
+# import numpy as np
+# from sentence_transformers import SentenceTransformer
+# from sklearn.metrics.pairwise import cosine_similarity
+# from tqdm import tqdm
+
+# # ------------------------------------
+# # 1. Configuration
+# # ------------------------------------
+
+# LOG_FILE_PATH = "/kaggle/input/log-files/hadoop-hdfs-datanode-mesos-19.log"
+
+# CHUNK_SIZE = 30      # lines per chunk
+# OVERLAP = 5          # overlapping lines
+# TOP_PERCENT = 5      # bottom 5% chunks considered failures
+
+# # ------------------------------------
+# # 2. Load SBERT model
+# # ------------------------------------
+
+# model = SentenceTransformer("all-MiniLM-L6-v2")
+
+# # ------------------------------------
+# # 3. Chunking function
+# # ------------------------------------
+
+# # def chunk_log_lines(lines, chunk_size=30, overlap=5):
+# #     chunks = []
+# #     indices = []
+
+# #     step = chunk_size - overlap
+# #     for start in range(0, len(lines), step):
+# #         end = start + chunk_size
+# #         chunk = lines[start:end]
+
+# #         if len(chunk) < 5:
+# #             break
+
+# #         chunks.append("\n".join(chunk))
+# #         indices.append((start, end))
+
+# #     return chunks, indices
+
+# # ------------------------------------
+# # 3. Chunking function (LIMITED)
+# # ------------------------------------
+
+# def chunk_log_lines(lines, chunk_size=30, overlap=5, max_chunks=10000):
+#     chunks = []
+#     indices = []
+
+#     step = chunk_size - overlap
+
+#     for start in range(0, len(lines), step):
+#         if len(chunks) >= max_chunks:
+#             break
+
+#         end = start + chunk_size
+#         chunk = lines[start:end]
+
+#         if len(chunk) < 5:
+#             break
+
+#         chunks.append("\n".join(chunk))
+#         indices.append((start, end))
+
+#     return chunks, indices
+
+# # ------------------------------------
+# # 4. Read file and create chunks
+# # ------------------------------------
+
+# print("Reading log file...")
+
+# with open(LOG_FILE_PATH, "r", errors="ignore") as f:
+#     lines = f.readlines()
+
+# print(f"Total lines: {len(lines)}")
+# # chunks, chunk_line_ranges = chunk_log_lines(lines, CHUNK_SIZE, OVERLAP)
+
+# chunks, chunk_line_ranges = chunk_log_lines(
+#     lines,
+#     chunk_size=CHUNK_SIZE,
+#     overlap=OVERLAP,
+#     max_chunks=10000
+# )
+
+# print(f"Total chunks created: {len(chunks)}")
+
+# # ------------------------------------
+# # 5. Generate embeddings (batched)
+# # ------------------------------------
+
+# print("Generating embeddings...")
+
+# embeddings = model.encode(
+#     chunks,
+#     batch_size=64,
+#     normalize_embeddings=True,
+#     show_progress_bar=True
+# )
+
+# # ------------------------------------
+# # 6. Similarity-based anomaly detection
+# # ------------------------------------
+
+# # Compute centroid of all chunks
+# centroid = np.mean(embeddings, axis=0)
+
+# # Cosine similarity to centroid
+# similarities = cosine_similarity(embeddings, centroid.reshape(1, -1)).flatten()
+
+# # Lower similarity = more abnormal
+# threshold = np.percentile(similarities, TOP_PERCENT)
+
+# labels = ["ERROR" if s <= threshold else "NORMAL" for s in similarities]
+
+# # ------------------------------------
+# # 7. Output results
+# # ------------------------------------
+
+# print("\nSample detected abnormal chunks:\n")
+
+# count = 0
+# for i, (label, score) in enumerate(zip(labels, similarities)):
+#     if label == "ERROR":
+#         start, end = chunk_line_ranges[i]
+#         print(f"Chunk {i} | Lines {start}-{end} | Similarity={score:.4f}")
+#         print(chunks[i][:500])  # print first 500 chars
+#         print("-" * 80)
+#         count += 1
+#         if count >= 5:
+#             break
+
+# print(f"\nTotal ERROR chunks detected: {labels.count('ERROR')}")
+# print(f"Total NORMAL chunks detected: {labels.count('NORMAL')}")
+
+# # ------------------------------------
+# # 8. (Optional) Save results
+# # ------------------------------------
+
+# with open("chunk_classification_results.txt", "w") as out:
+#     for i, label in enumerate(labels):
+#         start, end = chunk_line_ranges[i]
+#         out.write(f"{label}\tChunk {i}\tLines {start}-{end}\tSimilarity={similarities[i]:.4f}\n")
+
+# print("\nResults saved to chunk_classification_results.txt")
+
+
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+from tqdm import tqdm
+import re
+
+# ----------------------------
+# 1. Configuration
+# ----------------------------
+LOG_FILE_PATH = "/kaggle/input/log-files/hadoop-hdfs-datanode-mesos-19.log"
+
+CHUNK_SIZE = 30
+OVERLAP = 10
+MAX_CHUNKS = 10000
+MIN_LINES_PER_CHUNK = 5
+BATCH_SIZE = 64
+TOP_PERCENT = 10  # top anomalies to inspect
+KEYWORD_BOOST = ["ERROR", "EXCEPTION", "WARN", "FAILED", "TIMEOUT"]  # optional
+
+# ----------------------------
+# 2. Load SBERT
+# ----------------------------
+model = SentenceTransformer("all-MiniLM-L6-v2")
+
+# ----------------------------
+# 3. Preprocessing
+# ----------------------------
+def clean_line(line):
+    line = re.sub(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', '', line)  # remove timestamps
+    line = re.sub(r'ID=[\w\d]+', '', line)  # remove IDs
+    return line.strip()
+
+# ----------------------------
+# 4. Chunking
+# ----------------------------
+def chunk_log_lines(lines):
+    chunks = []
+    indices = []
+    step = CHUNK_SIZE - OVERLAP
+    for start in range(0, len(lines), step):
+        if len(chunks) >= MAX_CHUNKS:
+            break
+        end = start + CHUNK_SIZE
+        chunk_lines = [clean_line(l) for l in lines[start:end] if l.strip()]
+        if len(chunk_lines) < MIN_LINES_PER_CHUNK:
+            continue
+        chunks.append(chunk_lines)
+        indices.append((start, end))
+    return chunks, indices
+
+# ----------------------------
+# 5. Read log file
+# ----------------------------
+with open(LOG_FILE_PATH, "r", errors="ignore") as f:
+    lines = f.readlines()
+    
+lines = lines[:20000]
+chunks, chunk_line_ranges = chunk_log_lines(lines)
+print(f"Total chunks: {len(chunks)}")
+
+# ----------------------------
+# 6. Embedding chunks (line-level, max pooling)
+# ----------------------------
+def embed_chunks(chunks):
+    chunk_embeddings = []
+    print("Embedding chunks...")
+    for chunk in tqdm(chunks):
+        line_embs = model.encode(chunk, normalize_embeddings=True)
+        chunk_emb = np.max(line_embs, axis=0)  # max-pool lines
+        chunk_embeddings.append(chunk_emb)
+    return np.vstack(chunk_embeddings)
+
+chunk_embeddings = embed_chunks(chunks)
+
+# ----------------------------
+# 7. Compute anomaly scores
+# ----------------------------
+# Global centroid similarity
+centroid = np.mean(chunk_embeddings, axis=0)
+global_sim = cosine_similarity(chunk_embeddings, centroid.reshape(1, -1)).flatten()
+
+# Local similarity (neighbors)
+k = 5
+local_sim = []
+for i, emb in enumerate(chunk_embeddings):
+    start = max(0, i - k)
+    end = min(len(chunk_embeddings), i + k + 1)
+    neighbors = chunk_embeddings[start:end]
+    sim = cosine_similarity([emb], neighbors).mean()
+    local_sim.append(sim)
+local_sim = np.array(local_sim)
+
+# Combine global and local similarity
+combined_score = 1 - (0.5 * global_sim + 0.5 * local_sim)
+
+# ----------------------------
+# 8. Optional: Boost known error keywords
+# ----------------------------
+for i, chunk in enumerate(chunks):
+    if any(any(k.upper() in line.upper() for k in KEYWORD_BOOST) for line in chunk):
+        combined_score[i] += 0.1  # boost anomaly score
+
+# ----------------------------
+# 9. Rank anomalies
+# ----------------------------
+sorted_idx = np.argsort(-combined_score)
+
+print("\nTop anomalous chunks (including errors):\n")
+for rank, i in enumerate(sorted_idx[:10]):
+    start, end = chunk_line_ranges[i]
+    print(f"Rank {rank+1} | Lines {start}-{end} | Score: {combined_score[i]:.4f}")
+    print("\n".join(chunks[i][:5]))  # preview first 5 lines
+    print("-" * 80)
+
+# ----------------------------
+# 10. Save anomaly scores
+# ----------------------------
+with open("chunk_anomaly_scores.txt", "w") as f:
+    for i, score in enumerate(combined_score):
+        start, end = chunk_line_ranges[i]
+        f.write(f"Lines {start}-{end}\tScore={score:.4f}\n")
+
+print("\nAll anomaly scores saved to chunk_anomaly_scores.txt")
+
+
+
+
+
+
+----------------------------------------combined using isolated forest, cosine similarity, kmeans-------------------------------
+
+
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.ensemble import IsolationForest
+from sklearn.cluster import KMeans
+from tqdm import tqdm
+import re
+import torch
+from transformers import AutoTokenizer, AutoModel
+
+
+# ----------------------------
+# 1. Configuration
+# ----------------------------
+LOG_FILE_PATH = "/kaggle/input/log-files/hadoop-hdfs-datanode-mesos-19.log"
+
+CHUNK_SIZE = 30
+OVERLAP = 10
+MAX_CHUNKS = 5000
+MIN_LINES_PER_CHUNK = 5
+BATCH_SIZE = 64
+TOP_PERCENT = 10  # top anomalies to inspect
+KEYWORD_BOOST = ["ERROR", "EXCEPTION", "WARN", "FAILED", "TIMEOUT"]  # optional
+
+# ----------------------------
+# 2. Load SBERT model
+# ----------------------------
+sbert_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+# ----------------------------
+# 3. Load LogBERT model
+# ----------------------------
+logbert_model_name = "microsoft/codebert-base"  # Example; replace with actual LogBERT if available
+tokenizer = AutoTokenizer.from_pretrained(logbert_model_name)
+logbert_model = AutoModel.from_pretrained(logbert_model_name)
+
+def logbert_embed(texts):
+    embeddings = []
+    for text in texts:
+        inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True, max_length=512)
+        with torch.no_grad():
+            outputs = logbert_model(**inputs)
+        emb = outputs.last_hidden_state.mean(dim=1).squeeze().numpy()
+        embeddings.append(emb)
+    return np.vstack(embeddings)
+
+# ----------------------------
+# 4. Preprocessing
+# ----------------------------
+def clean_line(line):
+    line = re.sub(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', '', line)  # remove timestamps
+    line = re.sub(r'ID=[\w\d]+', '', line)  # remove IDs
+    return line.strip()
+
+# ----------------------------
+# 5. Chunking
+# ----------------------------
+def chunk_log_lines(lines):
+    chunks = []
+    indices = []
+    step = CHUNK_SIZE - OVERLAP
+    for start in range(0, len(lines), step):
+        if len(chunks) >= MAX_CHUNKS:
+            break
+        end = start + CHUNK_SIZE
+        chunk_lines = [clean_line(l) for l in lines[start:end] if l.strip()]
+        if len(chunk_lines) < MIN_LINES_PER_CHUNK:
+            continue
+        chunks.append(chunk_lines)
+        indices.append((start, end))
+    return chunks, indices
+
+# ----------------------------
+# 6. Read log file
+# ----------------------------
+with open(LOG_FILE_PATH, "r", errors="ignore") as f:
+    lines = f.readlines()
+lines = lines[:10000]
+chunks, chunk_line_ranges = chunk_log_lines(lines)
+print(f"Total chunks: {len(chunks)}")
+
+# ----------------------------
+# 7. Embedding chunks
+# ----------------------------
+def embed_chunks(chunks):
+    sbert_embeddings = []
+    logbert_embeddings = []
+    print("Embedding chunks...")
+    for chunk in tqdm(chunks):
+        # Combine lines into chunk text
+        chunk_text = "\n".join(chunk)
+        
+        # SBERT embedding
+        sbert_emb = sbert_model.encode(chunk, normalize_embeddings=True)
+        sbert_max = np.max(sbert_emb, axis=0)
+        sbert_embeddings.append(sbert_max)
+        
+        # LogBERT embedding
+        logbert_emb = logbert_embed([chunk_text])[0]
+        logbert_embeddings.append(logbert_emb)
+        
+    return np.vstack(sbert_embeddings), np.vstack(logbert_embeddings)
+
+sbert_embeddings, logbert_embeddings = embed_chunks(chunks)
+
+
+
+
+# import numpy as np
+# from sentence_transformers import SentenceTransformer
+# from sklearn.metrics.pairwise import cosine_similarity
+# from sklearn.ensemble import IsolationForest
+# from sklearn.cluster import KMeans
+# from tqdm import tqdm
+# import re
+# import torch
+# from transformers import AutoTokenizer, AutoModel
+
+# # ----------------------------
+# # 1. Configuration
+# # ----------------------------
+
+# CHUNK_SIZE = 30
+# OVERLAP = 10
+# MAX_CHUNKS = 10000
+# MIN_LINES_PER_CHUNK = 5
+# BATCH_SIZE = 64
+
+# KEYWORD_BOOST = ["ERROR", "EXCEPTION", "WARN", "FAILED", "TIMEOUT"]
+
+# # ----------------------------
+# # 2. Input log (single huge log)
+# # ----------------------------
+
+
+# # Convert text → list of lines
+# lines = sample_text.splitlines()
+
+# print(f"Total lines in sample_text: {len(lines)}")
+
+# # ----------------------------
+# # 3. Load models
+# # ----------------------------
+
+# # SBERT
+# sbert_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+# # LogBERT (CodeBERT used as LogBERT proxy)
+# logbert_model_name = "microsoft/codebert-base"
+# tokenizer = AutoTokenizer.from_pretrained(logbert_model_name)
+# logbert_model = AutoModel.from_pretrained(logbert_model_name)
+
+# # ----------------------------
+# # 4. Preprocessing
+# # ----------------------------
+
+# def clean_line(line):
+#     line = re.sub(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', '', line)
+#     line = re.sub(r'ID=[\w\d]+', '', line)
+#     return line.strip()
+
+# # ----------------------------
+# # 5. Chunking
+# # ----------------------------
+
+# def chunk_log_lines(lines):
+#     chunks = []
+#     indices = []
+#     step = CHUNK_SIZE - OVERLAP
+
+#     for start in range(0, len(lines), step):
+#         if len(chunks) >= MAX_CHUNKS:
+#             break
+
+#         end = start + CHUNK_SIZE
+#         chunk_lines = [clean_line(l) for l in lines[start:end] if l.strip()]
+
+#         if len(chunk_lines) < MIN_LINES_PER_CHUNK:
+#             continue
+
+#         chunks.append(chunk_lines)
+#         indices.append((start, end))
+
+#     return chunks, indices
+
+# chunks, chunk_line_ranges = chunk_log_lines(lines)
+# print(f"Total chunks created: {len(chunks)}")
+
+# # ----------------------------
+# # 6. LogBERT embedding helper
+# # ----------------------------
+
+# def logbert_embed(texts):
+#     embeddings = []
+#     for text in texts:
+#         inputs = tokenizer(
+#             text,
+#             return_tensors="pt",
+#             truncation=True,
+#             padding=True,
+#             max_length=512
+#         )
+#         with torch.no_grad():
+#             outputs = logbert_model(**inputs)
+#         emb = outputs.last_hidden_state.mean(dim=1).squeeze().cpu().numpy()
+#         embeddings.append(emb)
+#     return np.vstack(embeddings)
+
+# # ----------------------------
+# # 7. Embed chunks
+# # ----------------------------
+
+# def embed_chunks(chunks):
+#     sbert_embeddings = []
+#     logbert_embeddings = []
+
+#     print("Embedding chunks...")
+#     for chunk in tqdm(chunks):
+#         # Join chunk into text
+#         chunk_text = "\n".join(chunk)
+
+#         # ---- SBERT (line-level + max pooling)
+#         line_embs = sbert_model.encode(chunk, normalize_embeddings=True)
+#         sbert_chunk_emb = np.max(line_embs, axis=0)
+#         sbert_embeddings.append(sbert_chunk_emb)
+
+#         # ---- LogBERT (chunk-level)
+#         logbert_chunk_emb = logbert_embed([chunk_text])[0]
+#         logbert_embeddings.append(logbert_chunk_emb)
+
+#     return np.vstack(sbert_embeddings), np.vstack(logbert_embeddings)
+
+# sbert_embeddings, logbert_embeddings = embed_chunks(chunks)
+
+# print("SBERT embeddings shape:", sbert_embeddings.shape)
+# print("LogBERT embeddings shape:", logbert_embeddings.shape)
+
+
+centroid = np.mean(sbert_embeddings, axis=0)
+global_sim = cosine_similarity(sbert_embeddings, centroid.reshape(1, -1)).flatten()
+k = 5
+local_sim = []
+for i, emb in enumerate(sbert_embeddings):
+    start = max(0, i - k)
+    end = min(len(sbert_embeddings), i + k + 1)
+    neighbors = sbert_embeddings[start:end]
+    sim = cosine_similarity([emb], neighbors).mean()
+    local_sim.append(sim)
+local_sim = np.array(local_sim)
+similarity_score = 1 - (0.5 * global_sim + 0.5 * local_sim)
+
+# ----------------------------
+# 9. Clustering-based score
+# ----------------------------
+
+# ----------------------------
+# 10. Isolation Forest score
+# ----------------------------
+
+# ----------------------------
+# 11. Optional: Keyword boost
+# ----------------------------
+
+print("\n=== Top Similarity-Based Anomalies ===\n")
+top_sim_idx = np.argsort(-similarity_score)
+
+for rank, i in enumerate(top_sim_idx[:5]):
+    start, end = chunk_line_ranges[i]
+    print(f"[SIM] Rank {rank+1} | Lines {start}-{end} | Score={similarity_score[i]:.4f}")
+    print("\n".join(chunks[i][:5]))
+    print("-" * 80)
+
+
+
+
+kmeans = KMeans(n_clusters=10, random_state=42)
+cluster_labels = kmeans.fit_predict(sbert_embeddings)
+cluster_distances = np.linalg.norm(sbert_embeddings - kmeans.cluster_centers_[cluster_labels], axis=1)
+cluster_score = cluster_distances / cluster_distances.max()  # normalize 0-1
+
+
+
+print("\n=== Top Clustering-Based Anomalies ===\n")
+top_cluster_idx = np.argsort(-cluster_score)
+
+for rank, i in enumerate(top_cluster_idx[:5]):
+    start, end = chunk_line_ranges[i]
+    print(f"[CLUSTER] Rank {rank+1} | Lines {start}-{end} | Score={cluster_score[i]:.4f}")
+    print("\n".join(chunks[i][:5]))
+    print("-" * 80)
+
+
+
+
+iso_forest = IsolationForest(contamination=0.05, random_state=42)
+iso_forest.fit(sbert_embeddings)
+iso_score = -iso_forest.score_samples(sbert_embeddings)  # higher = more anomalous
+iso_score = (iso_score - iso_score.min()) / (iso_score.max() - iso_score.min())  # normalize 0-1
+
+
+print("\n=== Top Isolation Forest Anomalies ===\n")
+top_iso_idx = np.argsort(-iso_score)
+
+for rank, i in enumerate(top_iso_idx[:5]):
+    start, end = chunk_line_ranges[i]
+    print(f"[IFOREST] Rank {rank+1} | Lines {start}-{end} | Score={iso_score[i]:.4f}")
+    print("\n".join(chunks[i][:5]))
+    print("-" * 80)
+
+
+
+
+keyword_score = np.zeros(len(chunks))
+for i, chunk in enumerate(chunks):
+    if any(any(k.upper() in line.upper() for k in KEYWORD_BOOST) for line in chunk):
+        keyword_score[i] = 0.1
+
+# ----------------------------
+# 12. Combine all anomaly scores
+# ----------------------------
+# You can experiment with weights
+combined_score = 0.3 * similarity_score + 0.3 * cluster_score + 0.3 * iso_score + keyword_score
+
+# ----------------------------
+# 13. Rank anomalies
+# ----------------------------
+sorted_idx = np.argsort(-combined_score)
+
+print("\nTop anomalous chunks (SBERT + LogBERT + Clustering + iForest):\n")
+for rank, i in enumerate(sorted_idx[:10]):
+    start, end = chunk_line_ranges[i]
+    print(f"Rank {rank+1} | Lines {start}-{end} | Score: {combined_score[i]:.4f}")
+    print("\n".join(chunks[i][:5]))
+    print("-" * 80)
+
+# ----------------------------
+# 14. Save results
+# ----------------------------
+with open("chunk_combined_anomaly_scores.txt", "w") as f:
+    for i, score in enumerate(combined_score):
+        start, end = chunk_line_ranges[i]
+        f.write(f"Lines {start}-{end}\tScore={score:.4f}\n")
+
+print("\nAll combined anomaly scores saved to chunk_combined_anomaly_scores.txt")
+
+
+
+
