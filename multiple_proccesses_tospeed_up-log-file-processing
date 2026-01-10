@@ -1,0 +1,211 @@
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+from tqdm import tqdm
+import re
+
+# ----------------------------
+# 1. Configuration
+# ----------------------------
+LOG_FILE_PATH = "/kaggle/input/log-files/hadoop-hdfs-datanode-mesos-19.log"
+
+CHUNK_SIZE = 30
+OVERLAP = 10
+MAX_CHUNKS = 10000
+MIN_LINES_PER_CHUNK = 5
+BATCH_SIZE = 64
+TOP_PERCENT = 10  # top anomalies to inspect
+KEYWORD_BOOST = ["ERROR", "EXCEPTION", "WARN", "FAILED", "TIMEOUT"]  # optional
+
+# ----------------------------
+# 2. Load SBERT
+# ----------------------------
+model = SentenceTransformer("all-MiniLM-L6-v2")
+
+# ----------------------------
+# 3. Preprocessing
+# ----------------------------
+def clean_line(line):
+    line = re.sub(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', '', line)  # remove timestamps
+    line = re.sub(r'ID=[\w\d]+', '', line)  # remove IDs
+    return line.strip()
+
+# ----------------------------
+# 4. Chunking
+# ----------------------------
+def chunk_log_lines(lines):
+    chunks = []
+    indices = []
+    step = CHUNK_SIZE - OVERLAP
+    for start in range(0, len(lines), step):
+        if len(chunks) >= MAX_CHUNKS:
+            break
+        end = start + CHUNK_SIZE
+        chunk_lines = [clean_line(l) for l in lines[start:end] if l.strip()]
+        if len(chunk_lines) < MIN_LINES_PER_CHUNK:
+            continue
+        chunks.append(chunk_lines)
+        indices.append((start, end))
+    return chunks, indices
+
+# ----------------------------
+# 5. Read log file
+# ----------------------------
+with open(LOG_FILE_PATH, "r", errors="ignore") as f:
+    lines = f.readlines()
+    
+# lines = lines[:20000]
+chunks, chunk_line_ranges = chunk_log_lines(lines)
+print(f"Total chunks: {len(chunks)}")
+
+# ----------------------------
+# 6. Embedding chunks (line-level, max pooling)
+# ----------------------------
+def embed_chunks(chunks):
+    chunk_embeddings = []
+    print("Embedding chunks...")
+    for chunk in tqdm(chunks):
+        line_embs = model.encode(chunk, normalize_embeddings=True)
+        chunk_emb = np.max(line_embs, axis=0)  # max-pool lines
+        chunk_embeddings.append(chunk_emb)
+    return np.vstack(chunk_embeddings)
+
+chunk_embeddings = embed_chunks(chunks)
+
+
+#---------------------------Thread-save-execution------------------------
+# import re
+# import numpy as np
+# from concurrent.futures import ThreadPoolExecutor, as_completed
+# from tqdm import tqdm
+
+
+# #---------------------------another saple method------------------------
+
+# ----------------------------
+# 1. Cleaning
+# ----------------------------
+# def clean_line(line):
+#     line = re.sub(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', '', line)
+#     line = re.sub(r'ID=[\w\d]+', '', line)
+#     return line.strip()
+
+# # ----------------------------
+# # 2. Split into 4 equal chunks
+# # ----------------------------
+# def split_into_four(lines, samples_per_chunk=5000):
+#     # assert len(lines) >= samples_per_chunk * 4, "Not enough lines"
+#     return [
+#         lines[0:2500],
+#         lines[2500:5000],
+#         lines[5000:7500],
+#         lines[7500:10000]
+#     ]
+
+# with open(LOG_FILE_PATH, "r", errors="ignore") as f:
+#     lines = f.readlines()
+
+# lines = lines[:10000]
+
+# line1, line2, line3, line4 = split_into_four(lines)
+
+# # ----------------------------
+# # 5. Parallel embedding (4 threads)
+# # ----------------------------
+# chunks = [line1, line2, line3, line4]
+
+
+
+# import os
+# import numpy as np
+# from multiprocessing import Pool
+# from tqdm import tqdm
+
+# MODEL = None
+
+# def init_worker():
+#     global MODEL
+#     os.environ["OMP_NUM_THREADS"] = "1"
+#     os.environ["MKL_NUM_THREADS"] = "1"
+
+#     from sentence_transformers import SentenceTransformer
+#     MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+
+# def process_chunk_mp(chunk):
+#     global MODEL
+#     cleaned = [clean_line(l) for l in chunk if l.strip()]
+#     emb = MODEL.encode(
+#         cleaned,
+#         normalize_embeddings=True,
+#         batch_size=64,
+#         show_progress_bar=False
+#     )
+#     return np.max(emb, axis=0)
+
+# if __name__ == "__main__":
+#     with Pool(processes=4, initializer=init_worker) as pool:
+#         embeddings = list(
+#             tqdm(
+#                 pool.imap_unordered(process_chunk_mp, chunks),
+#                 total=len(chunks),
+#                 desc="Embedding chunks"
+#             )
+#         )
+
+# final_embeddings = np.vstack(embeddings)
+# print("Final shape:", final_embeddings.shape)
+
+#---------------------------running on GPU-----------------------
+
+# import re
+# import numpy as np
+# from sentence_transformers import SentenceTransformer
+# from tqdm import tqdm
+
+# # ----------------------------
+# # 1. Cleaning (CPU)
+# # ----------------------------
+# def clean_line(line):
+#     line = re.sub(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', '', line)
+#     line = re.sub(r'ID=[\w\d]+', '', line)
+#     return line.strip()
+
+# with open(LOG_FILE_PATH, "r", errors="ignore") as f:
+#     lines = f.readlines()
+
+# lines = lines[:20000]
+
+# cleaned_lines = [clean_line(l) for l in lines if l.strip()]
+
+# # ----------------------------
+# # 2. Load model ONCE on GPU
+# # ----------------------------
+# model = SentenceTransformer(
+#     "all-MiniLM-L6-v2",
+#     device="cuda"
+# )
+
+# # ----------------------------
+# # 3. Embed EVERYTHING in big batches
+# # ----------------------------
+# embeddings = model.encode(
+#     cleaned_lines,
+#     batch_size=512,          # try 512, 1024 if VRAM allows
+#     normalize_embeddings=True,
+#     show_progress_bar=True
+# )
+
+# # ----------------------------
+# # 4. Pool into 4 chunks
+# # ----------------------------
+# chunk_size = 40
+
+# final_embeddings = np.vstack([
+#     np.max(embeddings[i*chunk_size:(i+1)*chunk_size], axis=0)
+#     for i in range(500)
+# ])
+
+# print("Final shape:", final_embeddings.shape)
+
+
+#--------------------------------------------------------------------
