@@ -1,0 +1,129 @@
+with open("huge.txt") as f:
+    for line in f:
+        process(line)
+
+
+from itertools import islice
+
+CHUNK_SIZE = 30
+MAX_LINES = 2000
+
+with open("huge.txt") as f:
+    lines_read = 0
+
+    while lines_read < MAX_LINES:
+        chunk = list(islice(f, CHUNK_SIZE))
+        if not chunk:
+            break  # EOF
+
+        process(chunk)
+        lines_read += len(chunk)
+
+
+
+CHUNK_SIZE = 30
+MAX_LINES = 2000
+
+with open("huge.txt") as f:
+    chunk = []
+
+    for i, line in enumerate(f):
+        if i >= MAX_LINES:
+            break
+
+        chunk.append(line)
+
+        if len(chunk) == CHUNK_SIZE:
+            process(chunk)
+            chunk = []
+
+    if chunk:  # leftover lines
+        process(chunk)
+
+
+
+from itertools import islice
+
+def read_line_chunks(file, chunk_size, max_lines):
+    count = 0
+    while count < max_lines:
+        chunk = list(islice(file, min(chunk_size, max_lines - count)))
+        if not chunk:
+            break
+        count += len(chunk)
+        yield chunk
+
+with open("huge.txt") as f:
+    for chunk in read_line_chunks(f, 30, 2000):
+        process(chunk)
+
+
+
+import numpy as np
+
+data = np.memmap("huge.dat", dtype=np.float32, mode="r", shape=(10_000_000, 20))
+
+# behaves like a NumPy array, but not fully loaded
+sample = data[:100_000]
+
+
+
+from itertools import islice
+
+def read_chunks(f, size):
+    while chunk := list(islice(f, size)):
+        yield chunk
+
+with open("huge.txt") as f:
+    for chunk in read_chunks(f, 10_000):
+        features = extract_features(chunk)
+        update_model(features)
+
+
+
+
+import pandas as pd
+
+for chunk in pd.read_csv(
+        "huge.csv",
+        chunksize=500_000,
+        low_memory=False
+    ):
+    process(chunk)   # feature extraction, aggregation, ML
+
+
+
+import duckdb
+
+df = duckdb.query("""
+    SELECT col1, AVG(col2)
+    FROM read_csv_auto('huge.csv')
+    GROUP BY col1
+""").df()
+
+
+import aiofiles
+import asyncio
+
+async def read_file():
+    async with aiofiles.open("huge.txt", "r") as f:
+        async for line in f:
+            process(line)
+
+asyncio.run(read_file())
+
+
+with open("huge.txt", "r") as f:
+    while chunk := f.read(1024 * 1024):  # 1 MB
+        process(chunk)
+
+
+import mmap
+
+with open("huge.txt", "r") as f:
+    with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+        for line in iter(mm.readline, b""):
+            process(line)
+
+
+
