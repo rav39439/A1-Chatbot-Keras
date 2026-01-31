@@ -1,0 +1,170 @@
+from langchain_ollama import ChatOllama
+from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage, AIMessage,SystemMessage
+from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.graph import StateGraph, START, END
+from pydantic import BaseModel, Field
+from typing import List
+from langgraph.graph.message import add_messages
+from typing import TypedDict,Annotated
+from langchain_core.tools import BaseTool
+
+# 1️⃣ Define a simple tool
+@tool
+def client_error(description: str) -> str:
+    """This tool runs whenever there is timeout or login error in the description"""
+    print("------------client error has occured-----------")
+    fake_data = {"Delhi": "Hot, 33°C", "Mumbai": "Humid, 29°C"}
+    return fake_data.get("client error has occured.")
+
+@tool
+def testcase_error(description: str) -> str:
+    """This tool runs whenever there is mention of error in testscript or code in the description"""
+    print("------------testcase error has occured-----------")
+    fake_data = {"Delhi": "Hot, 33°C", "Mumbai": "Humid, 29°C"}
+    return fake_data.get("testcase error has occured.")
+
+
+@tool
+def runtime_error(description: str) -> str:
+    """This tool runs whenever there is mention of error in runtime error in the description"""
+    print("------------runtime error has occured-----------")
+    return "runtime error has occured."
+
+@tool
+def cluster_error(description: str) -> str:
+    """This tool runs whenever there is mention of error in configuration of cluster in the description"""
+    print("------------cluster error has occured-----------")
+    fake_data = {"Delhi": "Hot, 33°C", "Mumbai": "Humid, 29°C"}
+    return fake_data.get("cluster error has occured.")
+
+
+
+@tool
+def configuration_error(description: str) -> str:
+    """The tool runs whenever there is configuration error or file script error in the description """
+    print("------------configuration error has occured-----------")
+    return "configuration error has occured."
+
+
+# 2️⃣ Define the graph state using Pydantic
+class State(TypedDict):
+    
+    messages: Annotated[list, add_messages]
+
+# 3️⃣ Initialize LLM and bind the tool
+
+
+# 4️⃣ Define a function that runs the LLM
+      
+llm = ChatOllama(model="llama3.2")
+
+
+llm_with_tools = llm.bind_tools([client_error, configuration_error,cluster_error, testcase_error,runtime_error])
+# 4️⃣ Define a function that runs the LLM
+def llm_step():
+    user_points = [
+    "Error in configuration of the file script",
+    "User not able to login to the system",
+    "There is a frequent timeout",
+    "testscript error in the code",
+    "cluster configuration has failed",
+    "runtime error has occurred"
+]
+    system_prompt = SystemMessage(
+    content=(
+        "You are an error defect analyst. You have access to the following tools: "
+        "client_error, configuration_error, cluster_error, testcase_error,runtime_error. "
+        "You will be provided with a list of user query points. "
+        "For each point in the list, analyze it separately and determine which tool(s) should be called. "
+        "Generate a tool call for each point independently. "
+        "If a point matches multiple tools, generate multiple tool calls for that point. "
+        "Do not combine multiple points into a single tool call. "
+        "Only output structured tool calls in JSON format with fields: 'tool_name' and 'args'."
+    )
+)
+
+#     system_prompt = SystemMessage(
+#     content=(
+#         "You are an error defect analyst. "
+#         "You are provided with a set of tools and user queries. "
+#         "You MUST answer user queries ONLY by running tools. "
+#         "You MAY run multiple tools if required."
+#         "Call all the tools that is provided to you"
+#         # "If the user query matches a tool description in any way, "
+#         # "you MUST run that tool. "
+#         # "Do NOT answer anything outside tool outputs."
+#     )
+# )
+
+    # user_prompt = HumanMessage(
+    #     content=(
+    #         "Error in configuration of the file script. "
+    #         "User not able to login to the system. "
+    #         "There is also a timeout at frequent intervals."
+    #         "testscript error in the code"
+    #         "cluster configuration has failed"
+    #     )
+    # )
+    user_prompt = HumanMessage(
+    content="\n".join([f"{i+1}. {p}" for i, p in enumerate(user_points)])
+
+)
+
+    response = llm_with_tools.invoke([system_prompt, user_prompt])
+    print(response)
+    # state["messages"].append(response)
+    # return state
+
+# 5️⃣ Create ToolNode
+# tool_node = ToolNode([client_error, configuration_error])
+
+# # 6️⃣ Build the graph
+# graph_builder = StateGraph(State)
+# graph_builder.add_node("llm", llm_step)
+# graph_builder.add_node("tools", tool_node)
+# graph_builder.add_conditional_edges( "llm", tools_condition, "tools")
+# graph_builder.add_edge("tools", "llm")
+# graph_builder.add_edge(START, "llm")
+
+
+# 7️⃣ Compile the graph
+# app = graph_builder.compile()
+
+# 8️⃣ Initialize and run
+import asyncio
+async def main():
+    llm_step()
+    # description="Error in configuration of the file script." \
+    # "User not able to login to the system. " \
+    # "There is also a timeout at frequent intervals."
+    # user_input = f"Explain this error{description} "
+    # config = {"recursion_limit": 20}  # optional, can omit
+
+    # # 👇 The async equivalent of invoke()
+    # result = await app.ainvoke(
+    #     {"messages": [HumanMessage(content=user_input)]}    )
+
+    # print("\n--- FINAL OUTPUT ---")
+    # print(result["messages"][-1].content)
+
+# 9️⃣ Run it
+if __name__ == "__main__":
+    asyncio.run(main())
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+       
