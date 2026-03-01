@@ -1,3 +1,295 @@
+import os
+import json
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from transformers import BertTokenizerFast
+
+# ----------------------------
+# CONFIG
+# ----------------------------
+SEQ_LEN = 640
+ARTICLE_MAX_TOKENS = 400
+BATCH_SIZE = 32
+EPOCHS = 2
+LR = 3e-4
+NUM_SAMPLES = 120000
+JSONL_PATH = "/kaggle/working/data.jsonl"
+
+# ----------------------------
+# LOAD DATA
+# ----------------------------
+df = pd.read_csv('/kaggle/input/news-summarization/data.csv')
+df = df.dropna(subset=["Content","Summary"]).reset_index(drop=True)
+df = df.head(NUM_SAMPLES)
+
+# ----------------------------
+# WRITE JSONL
+# ----------------------------
+with open(JSONL_PATH, "w", encoding="utf-8") as out:
+    for _, row in df.iterrows():
+        item = {
+            "instruction":"summarize",
+            "input": row["Content"],
+            "output": row["Summary"]
+        }
+        out.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+# ----------------------------
+# TOKENIZER
+# ----------------------------
+tokenizer = BertTokenizerFast.from_pretrained("bert-base-uncased")
+
+special_tokens = {
+    "additional_special_tokens": [
+        "<ARTICLE>",
+        "</ARTICLE>",
+        "<SUMMARY>",
+        "</SUMMARY>",
+        "<END>"
+    ]
+}
+tokenizer.add_special_tokens(special_tokens)
+
+VOCAB_SIZE = tokenizer.vocab_size + len(special_tokens["additional_special_tokens"])
+
+# ----------------------------
+# BUILD SEQUENCE
+# ----------------------------
+def make_sequence(article, summary):
+
+    # tokenize article separately
+    art_tokens = tokenizer.encode(
+        article,
+        add_special_tokens=False,
+        max_length=ARTICLE_MAX_TOKENS,
+        truncation=True
+    )
+
+    # remaining tokens for summary
+    remaining = SEQ_LEN - len(art_tokens) - 6
+
+    sum_tokens = tokenizer.encode(
+        summary,
+        add_special_tokens=False,
+        max_length=max(0, remaining),
+        truncation=True
+    )
+
+    tokens = (
+        tokenizer.convert_tokens_to_ids(["<ARTICLE>"])
+        + art_tokens
+        + tokenizer.convert_tokens_to_ids(["</ARTICLE>", "<SUMMARY>"])
+        + sum_tokens
+        + tokenizer.convert_tokens_to_ids(["</SUMMARY>", "<END>"])
+    )
+
+
+    tokens = tokens[:SEQ_LEN]
+    tokens += [tokenizer.pad_token_id] * (SEQ_LEN - len(tokens))
+
+    return tokens
+
+# ----------------------------
+# CREATE DATASET
+# ----------------------------
+X_all = []
+Y_all = []
+mask_all = []
+
+for line in open(JSONL_PATH, encoding="utf-8"):
+    ex = json.loads(line)
+    seq = make_sequence(ex["input"], ex["output"])
+
+    X_all.append(seq[:-1])
+    Y_all.append(seq[1:])
+
+    # mask creation
+    tokens = tokenizer.convert_ids_to_tokens(seq)
+    mask = []
+    summary_started = False
+
+    for tok in tokens[1:]:
+        if tok == "<SUMMARY>":
+            summary_started = True
+            mask.append(1)
+        elif tok == "<END>":
+            mask.append(1)
+        else:
+            mask.append(1 if summary_started else 0)
+
+    mask_all.append(mask)
+
+X_all = np.array(X_all, dtype=np.int32)
+Y_all = np.array(Y_all, dtype=np.int32)
+mask_all = np.array(mask_all, dtype=np.float32)
+
+# ----------------------------
+# TF DATASET
+# ----------------------------
+dataset = tf.data.Dataset.from_tensor_slices((X_all, Y_all, mask_all))
+dataset = dataset.shuffle(1024).batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
+
+# ----------------------------
+# MODEL (assumes your class exists)
+# ----------------------------
+model = DecoderOnlyTransformer(
+    num_layers=8,
+    d_model=256,
+    num_heads=8,
+    dff=512,
+    vocab_size=VOCAB_SIZE,
+    maximum_position_encoding=SEQ_LEN,
+    rate=0.1
+)
+
+import shutil
+# src ="/kaggle/input/test-model-test2"
+# dst = "/kaggle/working/test-model-test2"
+# shutil.copytree(src, dst, dirs_exist_ok=True)
+checkpoint_path = "/kaggle/working/transformer_epoch_{epoch:40b}.weights.h5"
+# checkpoint_cb = tf.keras.callbacks.ModelCheckpoint(
+#     checkpoint_path,
+#     save_weights_only=True,
+#     monitor='loss',
+#     verbose=1,
+#     save_freq='epoch'
+# )
+dummy_inp = tf.random.uniform((1, SEQ_LEN), dtype=tf.int64, minval=0, maxval=200) 
+dummy_tar = tf.random.uniform((1, SEQ_LEN), dtype=tf.int64, minval=0, maxval=200) 
+_ = logits = model(dummy_inp, training=False) # ====== STEP 2: Load Pretrained Weights ====== 
+model.load_weights("/kaggle/working/transformer_epoch_{epoch:39b}.weights.h5")
+#model.load_weights("/kaggle/input/summarizationopt-model/transformermodel.weights.h5")
+
+print("checkpoint has successfully loade")
+class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
+    def __init__(self, d_model, warmup_steps=4000):
+        super().__init__()
+        self.d_model = tf.cast(d_model, tf.float32)
+        self.warmup_steps = warmup_steps
+
+    def __call__(self, step):
+        step = tf.cast(step, tf.float32)
+        arg1 = tf.math.rsqrt(step)
+        arg2 = step * (self.warmup_steps ** -1.5)
+        return tf.math.rsqrt(self.d_model) * tf.math.minimum(arg1, arg2)
+
+
+# lr = CustomSchedule(EMBED_DI
+loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+optimizer = tf.keras.optimizers.Adam(learning_rate=LR)
+model.compile(optimizer=optimizer, loss=loss_fn, metrics=['sparse_categorical_accuracy'])
+#model.fit(dataset, epochs=EPOCHS)
+
+# # # # -------------------------
+# # # # SAVE WEIGHT
+# # # # -------------------------
+#model.save_weights(checkpoint_path)
+print("✅ Model training complete and weights saved")
+import tensorflow as tf
+
+
+# ----------------------------
+# GENERATION FUNCTION
+# # ----------------------------
+# def generate_summary(model, article, max_len=80):
+
+#     art_tokens = tokenizer.encode(
+#         article,
+#         add_special_tokens=False,
+#         max_length=ARTICLE_MAX_TOKENS,
+#         truncation=True
+#     )
+
+#     tokens = (
+#         tokenizer.convert_tokens_to_ids(["<ARTICLE>"])
+#         + art_tokens
+#         + tokenizer.convert_tokens_to_ids(["</ARTICLE>", "<SUMMARY>"])
+#     )
+
+#     tokens = tf.constant([tokens], dtype=tf.int32)
+
+#     for _ in range(max_len):
+
+#         preds = model(tokens)
+#         next_id = tf.argmax(preds[:, -1, :], axis=-1)[0].numpy()
+
+#         tokens = tf.concat([tokens, [[next_id]]], axis=-1)
+
+#         word = tokenizer.decode([next_id])
+#         if word == "<END>":
+#             break
+
+#         tokens = tokens[:, -SEQ_LEN:]
+
+#     return tokenizer.decode(tokens[0], skip_special_tokens=True)
+
+
+def generate_summary_full(model, article, max_len=80):
+    # Encode article tokens
+    art_tokens = tokenizer.encode(
+        article,
+        add_special_tokens=False,
+        max_length=ARTICLE_MAX_TOKENS,
+        truncation=True
+    )
+
+    # Start sequence with <ARTICLE> ... </ARTICLE> <SUMMARY>
+    tokens = (
+        tokenizer.convert_tokens_to_ids(["<ARTICLE>"])
+        + art_tokens
+        + tokenizer.convert_tokens_to_ids(["</ARTICLE>", "<SUMMARY>"])
+    )
+
+    tokens = tf.constant([tokens], dtype=tf.int32)
+
+    for _ in range(max_len):
+        preds = model(tokens)
+        next_id = tf.argmax(preds[:, -1, :], axis=-1)[0].numpy()
+        tokens = tf.concat([tokens, [[next_id]]], axis=-1)
+
+        word = tokenizer.decode([next_id])
+        if word == "<END>":
+            break
+
+        # Keep sliding window if sequence exceeds SEQ_LEN
+        tokens = tokens[:, -SEQ_LEN:]
+
+    # Decode WITHOUT skipping special tokens
+    full_text = tokenizer.decode(tokens[0], skip_special_tokens=False)
+
+    # Optional: replace special tokens with readable markers
+    full_text = (
+        full_text.replace("<ARTICLE>", "\nARTICLE:\n")
+                 .replace("</ARTICLE>", "\n")
+                 .replace("<SUMMARY>", "\nSUMMARY:\n")
+                 .replace("</SUMMARY>", "\n")
+                 .replace("<END>", "\n<END>")
+    )
+
+    return full_text
+
+# ----------------------------
+# TEST
+# ----------------------------
+# print(generate_summary_full(
+#     model,
+#     "New York police are concerned drones could become tools for terrorists, and are investigating"
+# ))
+print(df.iloc[0]["Content"])
+print(generate_summary_full(
+    model,
+    df.iloc[0]["Content"]
+))
+# ----------------------------
+# TEST
+# ----------------------------
+
+print(generate_summary(
+    model,
+    "Rohan received first prize. He performed well in the exam."
+))
+
 
 You said:
 I am trying to create model that can answer simple ,when ,how, what ..questions on topic indian history . How to accomplish this using transformer
