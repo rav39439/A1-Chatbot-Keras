@@ -291,6 +291,70 @@ print(generate_summary(
 ))
 
 
+
+
+
+training on meta questions:
+------------------------------------------------------------------------------------
+Question:
+A model produced an incorrect answer to a reasoning problem.
+
+Meta Question:
+How could the model detect that its answer might be wrong?
+
+Answer:
+The model could evaluate intermediate reasoning steps or compare multiple generated solutions.
+
+If different reasoning paths produce conflicting answers, this may indicate uncertainty.
+
+Such self-evaluation techniques can help identify potential errors.
+
+
+
+-----------------------------------------------------------------------------------------
+
+Question:
+A language model performs well on factual questions but struggles with multi-step reasoning tasks.
+
+Meta Question:
+Why can this happen even when the model is trained on a large dataset?
+
+Answer:
+Large datasets often contain direct question-answer pairs rather than step-by-step reasoning examples.
+
+Without exposure to reasoning chains, the model learns to retrieve answers instead of performing logical inference.
+
+Providing datasets with explicit reasoning steps can help the model learn multi-step reasoning.
+
+
+------------------------------------------------------------------------------------------
+
+Other format:
+
+[CONTEXT]
+The Amazon rainforest is the largest tropical rainforest in the world. It produces a large portion of Earth's oxygen and contains diverse plant and animal species.
+
+[QUESTION]
+Why is the Amazon rainforest important for Earth?
+
+[META-QUESTIONS]
+1. What role does the Amazon rainforest play in oxygen production?
+2. Why is biodiversity important for ecosystems?
+
+[ANSWER]
+The Amazon rainforest is important because it produces a significant amount of Earth's oxygen and supports an enormous variety of plants and animals. This biodiversity helps maintain ecological balance and supports life on the planet.
+
+
+
+
+
+
+
+
+
+
+
+
 You said:
 I am trying to create model that can answer simple ,when ,how, what ..questions on topic indian history . How to accomplish this using transformer
 
