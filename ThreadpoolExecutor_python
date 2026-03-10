@@ -1,0 +1,76 @@
+def Thread_pool_executor(tool_calls,tool_map,max_threads=2)
+
+result_list=[none]*len(tool_calls)
+result_map={}
+per_call_events=[]
+
+
+with threadPoolexecutor (max_workers=6) as executor:
+
+
+tasks=[]
+
+for order and tc in ennumarate(tool_calls):
+
+name, args, call_order= resolve_tool_name_args(tc)
+
+args["tool_call_order"]=call_order
+
+if not name or name not in alltools:
+
+async def _err(name ,order):
+   return (false, order,name)
+
+task.append(asyncio.create_task(_err())
+
+continue
+
+
+strucutured_tool=alltools[name]
+
+fn=structured_tool.func
+
+
+def runner(_args=args,_fn=fn):
+  if "raw" in args or len(args)==1:
+
+     return _fn(_args["raw"])
+
+  return _fn(**_args)
+
+afut=asyncio.wrap_future(executor.submit(runner())
+
+async def await_one(order=order,name=name,afut=afut):
+
+ try:
+   res=await afut
+   return (True,order,name,res)
+
+ catch Exception e:
+   return (False, order ,name ,f"error:{e}")
+
+
+task.append(asyncio.create_task(await_one())
+
+
+for t in asyncio.completed_task(task)
+
+   ok ,order ,name ,payload=await t
+
+item ={"ok":ok,"name":name, "order":order}
+
+if(ok):
+item[result]=payload
+else:
+
+item[error]=payload
+per_Call_events.append(item)
+
+result_list[order]=item
+
+result_map[name]=item.get(result) if ok else item.get(Error)
+
+return result_list, result_map, per_call_events
+
+
+
