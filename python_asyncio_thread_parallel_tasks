@@ -1,0 +1,107 @@
+async def toolinvoke(tool, args)-> any:
+   
+    if has attribute(tool,"ainovke"):
+       return await tool.ainvoke(args)
+    return await asyncio.to_thread(tool.invoke,args)
+
+
+
+def run_tool_calls_concurrently_with_gather(tool_calls,tool_registry)->any:
+    async _one(tc:Dict)->Dict:
+       args=tc.get("args")
+       receipent=tc.get("receipent_name")
+       tool_call_order=tc.get("tool_call_order")
+       tool=tool_registry.get(receipient)
+       if(tool is None)
+         return {ok:false,name:name,order:order, res:f"unknown tool{name}"
+       else:
+         try:
+           resp=await toolinvoke(tool,args)
+           return {ok:True,name:name,order:order,res:resp}
+         except exception:
+           return {ok:False,name:name,order:order,res:"unknown error"}
+    tasks=[_one(tc) for tc in tool_calls]
+    result_list=await asyncio.gather(*tasks,return_exception:False)
+    result_map={r.get(name) :r.get(result) for r in result_list if r.get(ok)}
+    result_list.sort(key =lamnda r : (r.get(order,10000),r.get(name,"")))
+    return result_list, result_map
+
+
+
+def extract_toolalls(chat_dict):
+  tool_calls=[]
+  for msg in chat_dict.get(Messages,[])
+    if getattr(msg,"__class__", None).__name__=="AIMessage":
+      content=msg.get("content",None)
+      if content:
+        try:
+           parsed=json.loads(content)
+           if(isinstance(parsed,list):
+             tool_calls.extend(parsed)
+           else:
+             tool_calls.append(parsed)
+        catch exception:
+            continue
+
+   return tool_calls
+
+
+
+ 
+
+async def samplesync():
+    proc=asyncio.create_subprocess_exec(
+    *command,
+    cwd:cwd,
+    stdout:async.subprocess.PIPE,
+    stderr:async.subprocess.PIPE, 
+    )      
+    stdoutLines=[]
+    stderrlines=[] 
+    tout=asyncio.create_task(drain_data(proc.stdout,stdoutLines,prefix="[STDOUT]"
+    terr=asyncio.create_task(drain_data(proc.stderr,stdoutLines,prefix="[STDERR]" 
+    try:
+      proc.wait()
+      stdout,stderr=asyncio.gather(tout,terr)
+    catch asyncio.cancelledError
+      try:
+         proc.terminate()
+      except ProcessLookupError
+         pass
+    .................
+    finally:
+    for t in (tout,terr)
+      if not t.done():
+        t.cancel()
+        with contextlib.supress(Exception):
+          await t
+    fulloutput=".".join(stderrlines)+"".join(stdoutlines)
+    return rc ,fulloutput
+
+      
+async drain_sync(stream,sink,prefix):  
+    while true:
+      chunnk=await stream.readline() 
+    if not chunk
+      break;
+    line =chunk.decode("utf-8",errors="replace")
+    sink.append(line)
+    if prefix:
+      print(f"{prefix}":f"{line.rstrip()}")
+
+--------------------------
+
+
+note; tool functions should be async and await
+
+
+ 
+ 
+
+
+
+      
+     
+
+         
+
