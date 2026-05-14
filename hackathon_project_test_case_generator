@@ -464,3 +464,489 @@ if __name__ == "__main__":
     pcode=extract_python_code(corrected_code)
 
     write_and_run_test_file(pcode)
+
+
+
+#---------------------------------updated code---------------------------
+
+import json
+import re
+import subprocess
+import sys
+from langchain_ollama import ChatOllama
+from langchain_core.messages import HumanMessage, SystemMessage
+import json
+from langchain_core.messages import HumanMessage, SystemMessage
+
+
+# -----------------------------
+# LLM Configuration
+# -----------------------------
+llm = ChatOllama(
+    model="llama3:8b",
+    temperature=0
+)
+
+
+# -----------------------------
+# Utility: Clean Markdown
+# -----------------------------
+def clean_llm_output(text: str) -> str:
+    """
+    Removes markdown code blocks safely.
+    """
+    text = text.replace("```python", "")
+    text = text.replace("```", "")
+    return text.strip()
+
+
+def extract_python_code(text: str) -> str:
+    """
+    Extracts Python code from LLM output.
+    Handles cases like:
+    - ```python ... ```
+    - ``` ... ```
+    - mixed text before/after code blocks
+    """
+
+    if not text:
+        return ""
+
+    # Case 1: explicit ```python blocks
+    pattern = r"```python(.*?)```"
+    matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
+
+    if matches:
+        return "\n\n".join(match.strip() for match in matches)
+
+    # Case 2: generic ``` blocks
+    pattern = r"```(.*?)```"
+    matches = re.findall(pattern, text, re.DOTALL)
+
+    if matches:
+        return "\n\n".join(match.strip() for match in matches)
+
+    # Case 3: fallback (no markdown found → return raw text)
+    return text.strip()
+def generate_test_scenarios(
+    endpoint: str,
+    method: str,
+    function_description: str,
+    input_schema,
+    output_schema,
+    query_parameters=None,
+    more_info: str = ""
+):
+    if query_parameters is None:
+        query_parameters = []
+
+    system_prompt = SystemMessage(
+        content="""
+       You are an expert QA automation engineer for REST APIs.
+
+Analyze only: API Description, Method, Endpoint (including query params), Input Schema, Output Schema, and More Info. Do not assume anything not provided.
+
+Generate test scenarios in 5 categories.
+
+IMPORTANT RULE:
+You must generate ONLY high-level test scenario descriptions in plain English.
+Do NOT include assertions, pseudo-code, logic expressions, operators, or any executable validation statements.
+
+schema_validation_tests:
+Describe scenarios that validate response structure, schema compliance, data types, and required fields. Focus only on what should be validated, not how.
+
+contract_tests:
+Describe scenarios that validate API contract correctness such as endpoint behavior, HTTP method correctness, and parameter usage. Do not include any logical expressions or validation code.
+
+negative_tests:
+Describe scenarios for invalid inputs, missing parameters, and malformed requests. Include expected failure behavior in natural language such as error type or status expectation, not assertions.
+
+boundary_tests:
+Describe edge cases such as minimum values, maximum values, empty inputs, and extreme input values. Explain expected system behavior in plain language.
+
+more_info_tests:
+Generate additional real-world or business-logic-driven scenarios strictly based on "More Info" and user intent. Avoid duplication of other categories.
+
+Rules:
+
+Do NOT generate assertions or executable logic
+Do NOT use operators like ===, >, <, instanceof, .length, etc.
+Do NOT generate code-like expressions or validation syntax
+You may modify query parameters freely for test coverage
+Modify input schema only for POST/PUT requests if needed
+Do not assume hidden fields or extra response keys
+Arrays and objects must be described conceptually, not in code form
+
+Output ONLY valid JSON in this format:
+
+{
+"schema_validation_tests": [],
+"contract_tests": [],
+"negative_tests": [],
+"boundary_tests": [],
+"more_info_tests": []
+}
+
+No explanations, no markdown, no extra text.
+"""
+    )
+    user_prompt = HumanMessage(
+        content=f"""
+    Endpoint: {endpoint}
+    Method: {method}
+
+    Description:
+    {function_description}
+
+    Input Schema:
+    {json.dumps(input_schema, indent=2)}
+
+    Output Schema:
+    {json.dumps(output_schema, indent=2)}
+
+    Query Parameters:
+    {json.dumps(query_parameters, indent=2)}
+
+    More Info:
+    {more_info}
+"""
+    )
+
+    response = llm.invoke([system_prompt, user_prompt])
+
+    raw_output = response.content.strip()
+
+    # Clean accidental markdown if present
+    raw_output = raw_output.replace("```json", "").replace("```", "").strip()
+
+    try:
+        parsed_json = json.loads(raw_output)
+    except json.JSONDecodeError:
+        print("Invalid JSON returned by LLM:")
+        print(raw_output)
+        raise
+
+    return parsed_json
+
+# -----------------------------
+# Generate Test Cases (Single Stage)
+# -----------------------------
+def generate_test_cases(
+    endpoint: str,
+    method: str,
+    function_description: str,
+    input_schema,
+    output_schema,
+    query_parameters=None,
+    more_info:str="",
+    test_scenarios=None
+):
+    if query_parameters is None:
+        query_parameters = []
+    
+    print(more_info)
+
+#     system_prompt = SystemMessage(
+#         content="""
+# You are an expert QA automation engineer generating Python pytest test cases for REST APIs. 
+
+
+# Generate as many test cases as necessary.
+
+# Your task:
+#       - Focus on "Test Scenarios","Input Schema", "Output Schema", "Method" and "Endpoint" provided in user prompt. Use these details to generate valid executable Python test cases in pytest framework.
+
+#       - Add try and except to handle exceptions in each testcase.
+
+#       - Whenever you catch an error in catch block, always print the error message in the catch block.
+
+#       - Do NOT use pytest.fail() or pytest.raises(). Use only assert inside try/except blocks where exceptions are caught using except Exception as e: and must never terminate execution.
+
+#       - If there is no error in try block, print "Testcase passed" in the try block.
+
+# CRITICAL RULES:
+# 1. You must get response in each testcase from the API. And use the response.json data in the test case.
+
+# 2. Use only the "Endpoint" provided in the user prompt for API calls.If the "Endpoint" has query parameters, you can change the value of query parameters for making api calls.
+
+# 3. Base all test cases ONLY on observable API behavior. If behavior is unknown, do not assume or create additional scenarios.
+
+# 4. Always check response.status_code before calling response.json(). Do not assume the response is valid JSON.
+
+# 5. Each test case function MUST be named in sequential format for easy tracking:
+# test_case_1, test_case_2, test_case_3, etc.
+# The numbering must be continuous and must reflect the order of generation.
+
+# 6. Output only in valid python code. Do not add any summary or explainations.
+# """
+
+
+#     )
+
+    # system_prompt = SystemMessage(
+    #     content="""
+    # You are an expert QA automation engineer generating Python pytest test cases for REST APIs.
+
+    # Your task:
+    #     - Focus on "Test Scenarios", "Input Schema", "Output Schema", "Method" and "Endpoint" provided in user prompt.
+    #     - Use these details to generate valid executable Python test cases in pytest framework.
+
+    #     - Add try and except to handle exceptions in each testcase.
+
+    #     - In the except block:
+    #             1. Always print the error message using:
+    #             print(f"Error: {e}")
+    #             2. Then re-raise the exception using:
+    #             raise
+
+    #     - If there is no error in try block, print:
+    #             print("Testcase passed")
+
+    # CRITICAL RULES:
+
+    # 1. You must get response in each testcase from the API and use response.json() data in assertions.
+
+    # 2. Always check response.status_code BEFORE calling response.json().Only call response.json() if status_code indicates success (e.g., 200).
+
+    # 3. Do NOT construct or assume alternative endpoints, URLs, or query parameters beyond what is explicitly provided in the input. Never add extra query parameters or modify endpoint structure unless explicitly stated.
+
+    # 4. Use ONLY the "Endpoint" provided in the user prompt for API calls.If the "Endpoint" has query parameters, you may vary their values.
+
+    # 5. Base all test cases ONLY on observable API behavior.If behavior is unknown, do NOT assume or fabricate responses.
+
+    # 6. Each test case function MUST be named sequentially:
+    # test_case_1, test_case_2, test_case_3, ...
+    # The numbering must be continuous.
+
+    # 7. Output ONLY valid executable Python code.Do NOT add summaries, markdown, explanations, or comments outside Python code.
+
+    # 8. Do NOT fabricate expected JSON responses.Assertions must validate real response structure, status code, presence of keys, types, or values based only on actual API behavior.
+    # """
+    # )
+
+    system_prompt=SystemMessage( content=("""
+
+    You are a QA engineer generating pytest tests for REST APIs.
+
+    Use ONLY Test Scenarios as the source of test case generation logic.
+    However, use Input Schema, Output Schema, Method, Endpoint only as supporting information to construct and validate the test cases.
+
+    Rules:
+
+    Each test uses try/except
+    except: print(f"Error: {e}") then raise
+    success: print("Testcase passed")
+    Call API and use response.json() only after status_code check (e.g., 200)
+    Do NOT assume/fabricate endpoints, URLs, query params, or responses
+    Use ONLY given Endpoint (no modifications or additions)
+    Validate only real response data (keys/types/status/values)
+    No pytest.fail/raises
+    Name tests: test_case_1, test_case_2, ...
+    Output ONLY Python code (no markdown/text)
+
+"""))
+
+    user_prompt = HumanMessage(
+        content=f"""
+    Endpoint: {endpoint}
+    
+    Method: {method}
+
+    Input Schema:
+    {json.dumps(input_schema, indent=2)}
+
+    Output Schema:
+    {json.dumps(output_schema, indent=2)}
+
+    TEST SCENARIOS:
+    {json.dumps(test_scenarios, indent=2)}
+
+
+"""
+
+
+    )
+
+    response = llm.invoke([system_prompt, user_prompt])
+
+    cleaned = clean_llm_output(response.content)
+
+    return cleaned
+
+
+# -----------------------------
+# Write & Execute Test File
+# -----------------------------
+def write_and_run_test_file(code: str, filename: str = "testcases.py"):
+    """
+    Writes generated test code to file and executes it.
+    """
+
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(code)
+
+    print(f"\n[INFO] Test file written: {filename}\n")
+
+    try:
+        result = subprocess.run(
+            [sys.executable, filename],
+            capture_output=True,
+            text=True
+        )
+
+        print("===== STDOUT =====")
+        print(result.stdout)
+
+        if result.stderr:
+            print("===== STDERR =====")
+            print(result.stderr)
+
+    except Exception as e:
+        print(f"[ERROR] Execution failed: {e}")
+
+
+
+
+
+def add_code_execution( code_with_imports: str):
+    system_prompt = SystemMessage(content="""
+1. You MUST return the EXACT input code unchanged.
+2. Do NOT delete, modify, reorder, or refactor any existing code or test functions.
+3. You may ONLY APPEND new code at the END of the file.
+4. You must add exactly one function run_all_tests() which collects all functions starting with "test_" using globals().values(), filters using callable(obj) and obj.__name__.startswith("test_"), executes each test safely using try/except, and prints PASS/FAIL for each test.
+5. Test discovery MUST ONLY use globals().values(); any use of dir(), __builtins__, or alternative reflection methods is invalid.
+6. You must add this exact execution block at the end of the file:
+7. if __name__ == "__main__": run_all_tests()
+8. DO NOT remove or regenerate existing test cases.
+9. DO NOT output partial code.
+10. Output must be:
+original code (unchanged)
+plus appended runner code only
+11. Output ONLY valid Python code.
+12.No markdown, no explanation, no text outside code.
+    """)
+
+    user_prompt = HumanMessage(content=f"""
+    Here is the code:
+
+    {code_with_imports}
+
+    Now add a test runner that executes all tests.
+    """
+
+)
+
+    response = llm.invoke([system_prompt, user_prompt])
+    return response.content
+
+
+
+def code_corrector(code_with_imports: str):
+    system_prompt = SystemMessage(content="""
+You are a STRICT Python Code Corrector and Repair Engine.
+
+Your job is to:
+FULLY ANALYZE and FIX the given Python code so it becomes 100% executable.
+
+CRITICAL RULES:
+    1. Preserve the original intent of the code while fixing all issues; you may modify, rewrite, or repair any part of the code. Ensure all missing imports are added at the top.
+    2. Fix all possible errors including syntax, indentation, imports, API calls, JSON parsing, runtime/logic errors, undefined variables, broken control flow, and incorrect function usage.
+    4. Validate and correct the API request by ensuring consistency between path parameters and query parameters (avoid duplicating the same identifier in both URL and params), and ensure all query values respect valid API constraints
+    5. If a test runner exists, fix it so it correctly discovers and executes all test_* functions using globals() (not __builtins__).
+    6. If no test runner exists, append a run_all_tests() function at the end that collects all test_* functions, executes them safely using try/except Exception, and prints PASS/FAIL for each test.
+    7. 10. DO NOT wrap output in markdown (no ```python or ```).
+    8. Output must be fully executable Python code with no explanations, no markdown, and no formatting wrappers.
+
+
+""")
+
+    user_prompt = HumanMessage(content=f"""
+Fix and correct the following Python code completely:
+
+{code_with_imports}
+
+Return ONLY the corrected executable version.
+""")
+
+    response = llm.invoke([system_prompt, user_prompt])
+    return response.content
+
+
+
+# -----------------------------
+# MAIN EXECUTION
+# -----------------------------
+if __name__ == "__main__":
+
+    endpoint = "https://dummyjson.com/todos/user/:userid"
+    method = "GET"
+    description = "This api fetches all the todos of the user by userId"
+
+    # input_schema = {
+    #     "merge": True, 
+    #     "products": [
+    #     {
+    #         "id": 1,
+    #         "quantity": 1,
+    #     },
+    #     ]
+    # }
+    input_schema=""
+
+
+    output_schema = {
+        "todos": [
+            {
+                "id": "Integer",
+                "todo": "string",
+                "completed": "boolean",
+                "userId": "Integer"
+            },
+            {
+                "id": "Integer",
+                "todo": "string",
+                "completed": "boolean",
+                "userId": "Integer"
+            }
+            
+        ],
+        "total": "Integer",
+        "skip": "Integer",
+        "limit": "Integer"
+    }
+
+    query_parameters = ["userid"]
+
+    more_info="You are provided with an API endpoint. Change the query parmeters in the API endpoints to check for different users and also check whether there are any missing fields in the output schema or any field in the output schema is undefined"
+
+    testscenarios=generate_test_scenarios(endpoint=endpoint, method=method, function_description=description, input_schema=input_schema, output_schema=output_schema, query_parameters=query_parameters, more_info=more_info)
+    # data = json.loads(testscenarios)
+
+    # test_scenarios = testscenarios["test_scenarios"]
+
+    print(testscenarios)
+
+    test_code = generate_test_cases(
+        endpoint=endpoint,
+        method=method,
+        function_description=description,
+        input_schema=input_schema,
+        output_schema=output_schema,
+        query_parameters=query_parameters,
+        more_info=more_info,
+        test_scenarios=testscenarios
+    )
+
+    print("test cases generated")
+
+    resulttantcode=add_code_execution(test_code)
+
+    print("code execution added")
+
+    corrected_code=code_corrector(resulttantcode)
+
+    print("code corrected")
+    pcode=extract_python_code(corrected_code)
+
+    write_and_run_test_file(pcode)
+
