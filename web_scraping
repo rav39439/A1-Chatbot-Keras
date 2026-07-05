@@ -1,0 +1,262 @@
+
+
+import re
+import xml.etree.ElementTree as ET
+
+
+def is_sentence(text):
+    text = text.strip()
+
+    if len(text) < 20:
+        return False
+
+    if re.fullmatch(r"[\d\.\- ]+", text):
+        return False
+
+    words = text.split()
+
+    if len(words) < 6:
+        return False
+
+    common_verbs = {
+        "is","are","was","were","be","have","has","can",
+        "should","will","uses","provides","supports",
+        "allows","contains","stores","runs","creates"
+    }
+
+    if not any(w.lower() in common_verbs for w in words):
+        return False
+
+    return True
+
+
+def filter_xml(root):
+    """
+    Filter ONLY <item> tags.
+    Keep paragraph, section, heading, code, note, table, etc.
+    """
+
+    kept = 0
+    removed = 0
+
+    for elem in root.iter():
+
+        if elem.text is None:
+            continue
+
+        text = elem.text.strip()
+
+        if not text:
+            continue
+
+        tag = elem.tag.lower()
+
+        # Always keep these tags
+        if tag in {
+            "section",
+            "heading",
+            # "paragraph",
+            "p",
+            "code",
+            "inline-code",
+            "note",
+            "table",
+            "row",
+            "cell"
+        }:
+            kept += 1
+            continue
+
+        # Only filter <item>
+        if tag == "item":
+
+            if is_sentence(text):
+                kept += 1
+            else:
+                elem.text = ""
+                removed += 1
+        
+        if tag == "paragraph":
+            if len(text.split()) > 20:
+                kept += 1
+            else:
+                elem.text = ""
+                removed += 1
+
+    print(f"Kept: {kept}")
+    print(f"Removed items: {removed}")
+
+    return root
+
+
+
+
+from playwright.sync_api import sync_playwright
+from bs4 import BeautifulSoup
+import xml.etree.ElementTree as ET
+
+
+def html_to_xml(html):
+    soup = BeautifulSoup(html, "html.parser")
+
+    root = ET.Element("document")
+    current_section = root
+
+    for tag in soup.find_all(True):
+
+        # -------------------------
+        # Headings
+        # -------------------------
+        if tag.name in ["h1", "h2", "h3", "h4", "h5", "h6"]:
+
+            current_section = ET.SubElement(root, "section")
+
+            heading = ET.SubElement(
+                current_section,
+                "heading",
+                level=tag.name[1]
+            )
+
+            heading.text = tag.get_text(" ", strip=True)
+
+        # -------------------------
+        # Paragraphs
+        # -------------------------
+        elif tag.name == "p":
+
+            text = tag.get_text(" ", strip=True)
+
+            if text:
+                para = ET.SubElement(current_section, "paragraph")
+                para.text = text
+
+        # -------------------------
+        # Code blocks
+        # -------------------------
+        elif tag.name == "pre":
+
+            code = tag.get_text("\n", strip=True)
+
+            if code:
+                node = ET.SubElement(current_section, "code")
+                node.text = code
+
+        # -------------------------
+        # Inline code
+        # -------------------------
+        elif tag.name == "code" and tag.parent.name != "pre":
+
+            code = tag.get_text(strip=True)
+
+            if code:
+                node = ET.SubElement(current_section, "inline-code")
+                node.text = code
+
+        # -------------------------
+        # Lists
+        # -------------------------
+        elif tag.name in ["ul", "ol"]:
+
+            lst = ET.SubElement(current_section, "list")
+
+            for li in tag.find_all("li", recursive=False):
+                item = ET.SubElement(lst, "item")
+                item.text = li.get_text(" ", strip=True)
+
+        # -------------------------
+        # Notes
+        # -------------------------
+        elif tag.name == "blockquote":
+
+            note = ET.SubElement(current_section, "note")
+            note.text = tag.get_text(" ", strip=True)
+
+        # -------------------------
+        # Tables
+        # -------------------------
+        elif tag.name == "table":
+
+            table = ET.SubElement(current_section, "table")
+
+            for tr in tag.find_all("tr"):
+
+                row = ET.SubElement(table, "row")
+
+                for cell in tr.find_all(["th", "td"]):
+                    c = ET.SubElement(row, "cell")
+                    c.text = cell.get_text(" ", strip=True)
+
+    return root
+
+
+# def extract_html_to_xml(url, output_file="output.xml"):
+#     with sync_playwright() as p:
+
+#         browser = p.chromium.launch(headless=True)
+
+#         page = browser.new_page()
+
+#         page.goto(url, wait_until="networkidle")
+
+#         # Rendered HTML
+#         html = page.content()
+
+#         browser.close()
+
+#     # Convert HTML → XML
+#     root = html_to_xml(html)
+
+#     # Pretty-print the XML
+#     ET.indent(root, space="    ", level=0)
+
+#     tree = ET.ElementTree(root)
+
+#     tree.write(
+#         output_file,
+#         encoding="utf-8",
+#         xml_declaration=True
+#     )
+
+#     print(f"XML saved to {output_file}")
+
+
+def extract_html_to_xml(url, output_file="output.xml"):
+    with sync_playwright() as p:
+
+        browser = p.chromium.launch(headless=True)
+
+        page = browser.new_page()
+
+        page.goto(url, wait_until="networkidle")
+
+        html = page.content()
+
+        browser.close()
+
+    # Convert HTML → XML
+    root = html_to_xml(html)
+
+    # Apply rule-based filtering
+    root = filter_xml(root)
+
+    # Pretty print
+    ET.indent(root, space="    ", level=0)
+
+    tree = ET.ElementTree(root)
+
+    tree.write(
+        output_file,
+        encoding="utf-8",
+        xml_declaration=True
+    )
+
+    print(f"Filtered XML saved to {output_file}")
+
+
+if __name__ == "__main__":
+
+    extract_html_to_xml(
+        "https://www.rfc-editor.org/rfc/rfc9110.html?utm_source=chatgpt.com",
+        "output.xml"
+    )
+
