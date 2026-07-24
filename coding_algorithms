@@ -1,0 +1,215 @@
+1. Searching Algorithms
+Linear Search
+Binary Search
+Binary Search on Answer
+Ternary Search
+Exponential Search
+Jump Search
+
+
+2. Sorting Algorithms
+Bubble Sort
+Selection Sort
+Insertion Sort
+Merge Sort
+Quick Sort
+Heap Sort
+Counting Sort
+
+
+3. Array Algorithms
+Prefix Sum
+Difference Array
+Sliding Window (Fixed Size)
+Sliding Window (Variable Size)
+Two Pointers
+Three Pointers
+Rotate Array Algorithm
+Merge Intervals
+Interval Scheduling
+Sweep Line Algorithm
+Spiral Matrix Traversal
+Monotonic Array Check
+Trapping Rain Water
+Container With Most Water
+
+
+4. String Algorithms
+Algorithm	Unique Concept
+Naive Pattern Matching	Basic substring search
+Knuth-Morris-Pratt (KMP)	Linear-time pattern matching using LPS
+Rabin-Karp	Hash-based pattern matching
+Z Algorithm	Prefix matching for pattern search
+Trie	Prefix-based string searching
+Suffix Array	Efficient suffix-based string queries
+Suffix Tree	Compressed suffix representation
+Longest Common Prefix (LCP Array)	Longest common prefix between suffixes
+Manacher's Algorithm	Linear-time longest palindrome
+Expand Around Center	Simple palindrome detection
+Aho-Corasick Algorithm	Multiple pattern matching simultaneously
+
+
+
+5. Linked List Algorithms
+Floyd Cycle Detection
+Reverse Linked List
+Reverse in K Groups
+Merge Two Sorted Lists
+Merge K Sorted Lists
+Find Middle Node
+Remove Nth Node from End
+Detect Intersection
+Copy Linked List with Random Pointer
+
+
+6. Stack Algorithms
+Monotonic Stack
+Next Greater Element
+Previous Greater Element
+Next Smaller Element
+Previous Smaller Element
+Largest Rectangle in Histogram
+Balanced Parentheses
+Min Stack
+Evaluate Postfix
+Infix to Postfix
+Infix to Prefix
+
+
+7. Queue Algorithms
+Circular Queue
+Monotonic Queue
+Priority Queue (Heap)
+Deque-based Sliding Window Maximum
+
+
+8. Heap Algorithms
+Heapify
+Top K Elements
+Kth Largest Element
+Merge K Sorted Arrays
+Running Median
+Huffman Coding
+
+
+9. Hashing Algorithms
+Hash Table Lookup
+Frequency Counting
+Hash Map Prefix Sum
+Hash Set Based Lookup
+Rolling Hash
+
+
+10. Recursion Algorithms
+Factorial
+Fibonacci
+Tower of Hanoi
+Recursive Tree Traversal
+Recursive Backtracking Framework
+
+
+11. Backtracking Algorithms
+Sudoku Solver
+Rat in Maze
+Word Search
+Combination Sum
+Generate Parentheses
+Permutations
+Combinations
+Palindrome Partitioning
+Restore IP Addresses
+
+
+12. Dynamic Programming
+Memoization
+Tabulation
+0/1 Knapsack
+Unbounded Knapsack
+Coin Change
+Longest Increasing Subsequence
+Longest Common Subsequence
+Longest Common Substring
+Edit Distance
+Matrix Chain Multiplication
+Partition Equal Subset Sum
+Digit DP
+Tree DP
+Interval DP
+
+
+13. Tree Algorithms
+DFS Traversal
+BFS Traversal
+Inorder Traversal
+Preorder Traversal
+Postorder Traversal
+Level Order Traversal
+Lowest Common Ancestor (LCA)
+Diameter of Tree
+Balanced Tree Check
+Tree Serialization
+Tree Deserialization
+Binary Search Tree Operations
+
+
+14. Graph Algorithms
+Breadth First Search (BFS)
+Depth First Search (DFS)
+Topological Sort (Kahn)
+Topological Sort (DFS)
+Union Find (Disjoint Set Union)
+Kruskal's Algorithm
+Prim's Algorithm
+Dijkstra's Algorithm
+Multi-source BFS
+0-1 BFS
+Shortest Path in DAG
+
+
+15. Greedy Algorithms
+Activity Selection
+Fractional Knapsack
+Job Scheduling
+Gas Station Problem
+Minimum Platforms
+Interval Merging
+Huffman Coding
+Greedy Coin Change
+
+
+
+-------------------out of scope-------------
+Array:
+Kadane's Algorithm
+Boyer-Moore Voting Algorithm
+Moore's Majority Voting
+
+
+Backtracking:
+N Queens
+
+
+Graph:
+Morris Traversal
+Bellman-Ford Algorithm
+Floyd-Warshall Algorithm
+A* Search
+Johnson's Algorithm
+Kosaraju's Algorithm
+Tarjan's SCC Algorithm
+Tarjan's Bridge Algorithm
+Tarjan's Articulation Point Algorithm
+Euler Path (Hierholzer)
+Hamiltonian Path (Backtracking)
+Bipartite Graph Check
+Cycle Detection (Directed)
+Cycle Detection (Undirected)
+
+DP:
+Rod Cutting
+Egg Dropping
+House Robber
+Maximum Subarray DP
+Catalan Numbers DP
+Bitmask DP
+
