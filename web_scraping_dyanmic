@@ -1,0 +1,926 @@
+
+
+import os
+import re
+import xml.etree.ElementTree as ET
+
+from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
+from urllib.parse import urljoin, urldefrag, urlparse
+
+
+# ============================================================
+# HTML TAGS TO REMOVE
+# ============================================================
+
+REMOVE_TAGS = {
+    "nav",
+    "footer",
+    "style",
+    "noscript",
+    "svg",
+    "canvas",
+    "iframe",
+    "form",
+    "button",
+    "input",
+    "select",
+    "label",
+    "figure",
+    "figcaption",
+    "script",
+    "aside",
+}
+
+
+# ============================================================
+# PARAGRAPH VALIDATION
+# ============================================================
+
+def is_valid_paragraph(text: str) -> bool:
+
+    text = text.strip()
+
+    if not text:
+        return False
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    ).strip()
+
+    if len(text) < 30:
+        return False
+
+    words = text.split()
+
+    if len(words) < 5:
+        return False
+
+    if re.fullmatch(
+        r"[\d\s.,;:!?()\-/+=%]+",
+        text
+    ):
+        return False
+
+    if re.fullmatch(
+        r"(https?://|www\.)\S+",
+        text,
+        flags=re.IGNORECASE
+    ):
+        return False
+
+    if re.fullmatch(
+        r"[A-Z0-9_\-]+",
+        text
+    ):
+        return False
+
+    alphabetic_chars = re.findall(
+        r"[A-Za-z]",
+        text
+    )
+
+    if len(alphabetic_chars) < 10:
+        return False
+
+    return True
+
+
+# ============================================================
+# HEADING VALIDATION
+# ============================================================
+
+def is_valid_heading(text: str) -> bool:
+
+    text = text.strip()
+
+    if not text:
+        return False
+
+    if len(text) > 300:
+        return False
+
+    if re.fullmatch(
+        r"[\d\s.,;:!?()\-/+=%]+",
+        text
+    ):
+        return False
+
+    if not re.search(
+        r"[A-Za-z]",
+        text
+    ):
+        return False
+
+    return True
+
+
+# ============================================================
+# LIST ITEM VALIDATION
+# ============================================================
+
+def is_valid_list_item(text: str) -> bool:
+
+    text = text.strip()
+
+    if not text:
+        return False
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    ).strip()
+
+    # Very short list items are usually navigation/buttons
+    if len(text) < 3:
+        return False
+
+    # Ignore items that contain only numbers/symbols
+    if re.fullmatch(
+        r"[\d\s.,;:!?()\-/+=%]+",
+        text
+    ):
+        return False
+
+    # Must contain at least one alphabetic character
+    if not re.search(
+        r"[A-Za-z]",
+        text
+    ):
+        return False
+
+    return True
+
+
+# ============================================================
+# HTML -> XML
+# ============================================================
+def html_to_xml(html: str):
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # --------------------------------------------------------
+    # Remove unwanted HTML tags
+    # --------------------------------------------------------
+
+    for tag in soup.find_all(REMOVE_TAGS):
+        try:
+            tag.decompose()
+        except Exception:
+            pass
+
+    # --------------------------------------------------------
+    # XML root
+    # --------------------------------------------------------
+
+    root = ET.Element("document")
+    current_section = root
+
+    # Tracks whether the current section contains
+    # at least one valid paragraph.
+    section_has_paragraph = False
+
+    # --------------------------------------------------------
+    # Process HTML elements
+    # --------------------------------------------------------
+
+    for tag in soup.find_all(True):
+
+        # ====================================================
+        # HEADINGS
+        # ====================================================
+
+        if tag.name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+
+            text = tag.get_text(" ", strip=True)
+
+            text = re.sub(r"\s+", " ", text).strip()
+
+            if not is_valid_heading(text):
+                continue
+
+            # Create a new section
+            current_section = ET.SubElement(
+                root,
+                "section"
+            )
+
+            heading = ET.SubElement(
+                current_section,
+                "heading",
+                level=tag.name[1]
+            )
+
+            heading.text = text
+
+            # New section does not contain a paragraph yet
+            section_has_paragraph = False
+
+        # ====================================================
+        # PARAGRAPHS
+        # ====================================================
+
+        elif tag.name == "p":
+
+            # Ignore paragraphs before the first heading
+            if current_section == root:
+                continue
+
+            text = tag.get_text(" ", strip=True)
+
+            text = re.sub(r"\s+", " ", text).strip()
+
+            if not is_valid_paragraph(text):
+                continue
+
+            paragraph = ET.SubElement(
+                current_section,
+                "paragraph"
+            )
+
+            paragraph.text = text
+
+            # The current section now contains a paragraph.
+            # Lists are allowed from this point onward.
+            section_has_paragraph = True
+
+        # ====================================================
+        # LISTS
+        # ====================================================
+
+        elif tag.name in {"ul", "ol"}:
+
+            # Ignore lists before the first section
+            if current_section == root:
+                continue
+
+            # IMPORTANT:
+            # A section must contain a paragraph before
+            # a list can be added.
+            if not section_has_paragraph:
+                continue
+
+            # Ignore nested lists
+            if tag.parent and tag.parent.name in {"ul", "ol"}:
+                continue
+
+            # Determine list type
+            if tag.name == "ul":
+                list_type = "unordered"
+            else:
+                list_type = "ordered"
+
+            list_element = ET.SubElement(
+                current_section,
+                "list",
+                type=list_type
+            )
+
+            # Get only direct <li> children
+            list_items = tag.find_all(
+                "li",
+                recursive=False
+            )
+
+            valid_items = 0
+
+            # ------------------------------------------------
+            # Process list items
+            # ------------------------------------------------
+
+            for li in list_items:
+
+                item_parts = []
+
+                for child in li.children:
+
+                    # Ignore nested lists
+                    if getattr(child, "name", None) in {"ul", "ol"}:
+                        continue
+
+                    if hasattr(child, "get_text"):
+                        item_text = child.get_text(
+                            " ",
+                            strip=True
+                        )
+                    else:
+                        item_text = str(child).strip()
+
+                    if item_text:
+                        item_parts.append(item_text)
+
+                # Combine item text
+                text = " ".join(item_parts)
+
+                text = re.sub(
+                    r"\s+",
+                    " ",
+                    text
+                ).strip()
+
+                if not is_valid_list_item(text):
+                    continue
+
+                item = ET.SubElement(
+                    list_element,
+                    "item"
+                )
+
+                item.text = text
+
+                valid_items += 1
+
+            # Remove list if it contains no valid items
+            if valid_items == 0:
+                current_section.remove(list_element)
+
+    return root
+
+
+# ============================================================
+# EXTRACT LINKS
+# ============================================================
+
+def extract_links_from_html(
+    html: str,
+    current_url: str
+):
+
+    soup = BeautifulSoup(
+        html,
+        "html.parser"
+    )
+
+    links = set()
+
+    for tag in soup.find_all(
+        "a",
+        href=True
+    ):
+
+        href = tag.get(
+            "href"
+        )
+
+        if not href:
+            continue
+
+        href = href.strip()
+
+        # Ignore unwanted links
+        if href.startswith(
+            (
+                "javascript:",
+                "mailto:",
+                "tel:",
+                "#",
+            )
+        ):
+            continue
+
+        # Convert relative URL to absolute
+        absolute_url = urljoin(
+            current_url,
+            href
+        )
+
+        # Remove fragment
+        absolute_url, _ = urldefrag(
+            absolute_url
+        )
+
+        parsed = urlparse(
+            absolute_url
+        )
+
+        # Only HTTP/HTTPS
+        if parsed.scheme not in {
+            "http",
+            "https",
+        }:
+            continue
+
+        links.add(
+            absolute_url
+        )
+
+    return sorted(links)
+
+
+# ============================================================
+# WRITE PAGE DATA
+# ============================================================
+
+def write_page_data(
+    page_root,
+    output_file,
+    url,
+    page_number
+):
+
+    # --------------------------------------------------------
+    # Create page element
+    # --------------------------------------------------------
+
+    page_element = ET.Element(
+        "page",
+        {
+            "number": str(page_number),
+            "url": url
+        }
+    )
+
+    # --------------------------------------------------------
+    # Copy scraped sections
+    # --------------------------------------------------------
+
+    for section in page_root:
+
+        page_element.append(
+            section
+        )
+
+    # --------------------------------------------------------
+    # Create new XML file
+    # --------------------------------------------------------
+
+    if (
+        not os.path.exists(output_file)
+        or os.path.getsize(output_file) == 0
+    ):
+
+        document = ET.Element(
+            "documents"
+        )
+
+        document.append(
+            page_element
+        )
+
+        tree = ET.ElementTree(
+            document
+        )
+
+        ET.indent(
+            tree,
+            space="    "
+        )
+
+        tree.write(
+            output_file,
+            encoding="utf-8",
+            xml_declaration=True
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # Load existing XML
+    # --------------------------------------------------------
+
+    try:
+
+        tree = ET.parse(
+            output_file
+        )
+
+        document = tree.getroot()
+
+    except ET.ParseError:
+
+        document = ET.Element(
+            "documents"
+        )
+
+        tree = ET.ElementTree(
+            document
+        )
+
+    # --------------------------------------------------------
+    # Append current page
+    # --------------------------------------------------------
+
+    document.append(
+        page_element
+    )
+
+    # --------------------------------------------------------
+    # Write immediately
+    # --------------------------------------------------------
+
+    ET.indent(
+        tree,
+        space="    "
+    )
+
+    tree.write(
+        output_file,
+        encoding="utf-8",
+        xml_declaration=True
+    )
+
+
+# ============================================================
+# SCRAPE ONE PAGE
+# ============================================================
+
+def scrape_page(
+    page,
+    url,
+    depth,
+    visited,
+    max_links,
+    max_depth,
+    output_file
+):
+
+    # ========================================================
+    # STOP CONDITIONS
+    # ========================================================
+
+    if len(visited) >= max_links:
+        return
+
+    if depth > max_depth:
+        return
+
+    if url in visited:
+        return
+
+    # ========================================================
+    # MARK URL AS VISITED
+    # ========================================================
+
+    visited.add(url)
+
+    page_number = len(visited)
+
+    print()
+    print("=" * 90)
+
+    print(
+        f"SCRAPING PAGE {page_number}/{max_links}"
+    )
+
+    print(
+        f"DEPTH : {depth}"
+    )
+
+    print(
+        f"URL   : {url}"
+    )
+
+    print("=" * 90)
+
+    # ========================================================
+    # STEP 1 -> LOAD PAGE
+    # ========================================================
+
+    try:
+
+        page.goto(
+            url,
+            wait_until="networkidle",
+            timeout=120000
+        )
+
+    except Exception as e:
+
+        print(
+            f"FAILED TO LOAD PAGE: {e}"
+        )
+
+        return
+
+    # ========================================================
+    # STEP 2 -> GET HTML
+    # ========================================================
+
+    try:
+
+        html = page.content()
+
+    except Exception as e:
+
+        print(
+            f"FAILED TO GET HTML: {e}"
+        )
+
+        return
+
+    # ========================================================
+    # STEP 3 -> SCRAPE PAGE
+    # ========================================================
+
+    try:
+
+        root = html_to_xml(
+            html
+        )
+
+    except Exception as e:
+
+        print(
+            f"FAILED TO PARSE PAGE: {e}"
+        )
+
+        return
+
+    # ========================================================
+    # STEP 4 -> COUNT DATA
+    # ========================================================
+
+    headings = root.findall(
+        ".//heading"
+    )
+
+    paragraphs = root.findall(
+        ".//paragraph"
+    )
+
+    lists = root.findall(
+        ".//list"
+    )
+
+    items = root.findall(
+        ".//item"
+    )
+
+    print(
+        f"Headings   : {len(headings)}"
+    )
+
+    print(
+        f"Paragraphs : {len(paragraphs)}"
+    )
+
+    print(
+        f"Lists      : {len(lists)}"
+    )
+
+    print(
+        f"List items : {len(items)}"
+    )
+
+    # ========================================================
+    # STEP 5 -> WRITE CURRENT PAGE
+    # ========================================================
+
+    try:
+
+        write_page_data(
+            page_root=root,
+            output_file=output_file,
+            url=url,
+            page_number=page_number
+        )
+
+        print(
+            f"Page {page_number} written successfully"
+        )
+
+        print(
+            f"Output     : {output_file}"
+        )
+
+    except Exception as e:
+
+        print(
+            f"FAILED TO WRITE PAGE: {e}"
+        )
+
+        return
+
+    # ========================================================
+    # STEP 6 -> STOP AFTER LAST PAGE
+    # ========================================================
+
+    if len(visited) >= max_links:
+
+        print()
+        print(
+            f"PAGE {page_number} WAS THE LAST PAGE"
+        )
+
+        print(
+            "Maximum page limit reached."
+        )
+
+        return
+
+    # ========================================================
+    # STEP 7 -> STOP AT MAX DEPTH
+    # ========================================================
+
+    if depth >= max_depth:
+
+        print(
+            "Maximum depth reached."
+        )
+
+        return
+
+    # ========================================================
+    # STEP 8 -> EXTRACT LINKS
+    # ========================================================
+
+    links = extract_links_from_html(
+        html,
+        url
+    )
+
+    print(
+        f"Links found: {len(links)}"
+    )
+
+    # ========================================================
+    # STEP 9 -> GO TO NEXT PAGE
+    # ========================================================
+
+    for link in links:
+
+        if len(visited) >= max_links:
+            return
+
+        if link in visited:
+            continue
+
+        print()
+        print(
+            f"NEXT PAGE -> {link}"
+        )
+
+        scrape_page(
+            page=page,
+            url=link,
+            depth=depth + 1,
+            visited=visited,
+            max_links=max_links,
+            max_depth=max_depth,
+            output_file=output_file
+        )
+
+        if len(visited) >= max_links:
+            return
+
+
+# ============================================================
+# MAIN SCRAPER FUNCTION
+# ============================================================
+
+def scrape_websites(
+    input_link: str,
+    output_path: str,
+    number_of_links: int,
+    max_depth: int = 3
+):
+
+    if not input_link:
+        raise ValueError(
+            "input_link cannot be empty."
+        )
+
+    if number_of_links <= 0:
+        raise ValueError(
+            "number_of_links must be greater than 0."
+        )
+
+    if max_depth < 0:
+        raise ValueError(
+            "max_depth cannot be negative."
+        )
+
+    # ========================================================
+    # CREATE OUTPUT DIRECTORY
+    # ========================================================
+
+    output_directory = os.path.dirname(
+        output_path
+    )
+
+    if output_directory:
+
+        os.makedirs(
+            output_directory,
+            exist_ok=True
+        )
+
+    # ========================================================
+    # VISITED URLS
+    # ========================================================
+
+    visited = set()
+
+    print()
+    print("=" * 90)
+
+    print(
+        "STARTING WEB SCRAPER"
+    )
+
+    print(
+        f"Starting URL : {input_link}"
+    )
+
+    print(
+        f"Output file  : {output_path}"
+    )
+
+    print(
+        f"Max pages    : {number_of_links}"
+    )
+
+    print(
+        f"Max depth    : {max_depth}"
+    )
+
+    print("=" * 90)
+
+    # ========================================================
+    # START PLAYWRIGHT
+    # ========================================================
+
+    with sync_playwright() as p:
+
+        browser = p.chromium.launch(
+            headless=True
+        )
+
+        page = browser.new_page()
+
+        scrape_page(
+            page=page,
+            url=input_link,
+            depth=0,
+            visited=visited,
+            max_links=number_of_links,
+            max_depth=max_depth,
+            output_file=output_path
+        )
+
+        browser.close()
+
+    # ========================================================
+    # FINAL RESULT
+    # ========================================================
+
+    print()
+    print("=" * 90)
+
+    print(
+        "SCRAPING COMPLETE"
+    )
+
+    print(
+        f"Pages scraped : {len(visited)}"
+    )
+
+    print(
+        f"Output file   : {output_path}"
+    )
+
+    print("=" * 90)
+
+    return visited
+
+
+# ============================================================
+# MAIN METHOD
+# ============================================================
+
+def main():
+
+    input_link = (
+        "https://en.wikipedia.org/wiki/Thermodynamics"
+    )
+
+    output_path = (
+        "data/thermodynamics.xml"
+    )
+
+    number_of_links = 20
+
+    max_depth = 3
+
+    scrape_websites(
+        input_link=input_link,
+        output_path=output_path,
+        number_of_links=number_of_links,
+        max_depth=max_depth
+    )
+
+
+# ============================================================
+# RUN
+# ============================================================
+
+if __name__ == "__main__":
+
+    main()
+
+
+
+
