@@ -1,0 +1,92 @@
+from sample_generator import generate_samples
+
+
+samples = generate_samples(
+    "output1.json",
+    input_fields={
+        "scenario_id": {"drop": True},
+        
+        "failure": {"drop":True},
+        "failure_type": {"drop":True},
+        #=--------------workload indicator scenarios------------------------
+        "read_iops": {"change": [0, 7], "direction": "increase", "drop": False},
+        "write_iops": {"change": [0, 7], "direction": "increase", "drop": False},
+        "total_iops": {"change": [0,7], "direction": "", "increase": False},
+        "read_bps": {"change": [0, 700000], "direction": "increase", "drop": False},
+        "write_bps": {"change": [0, 700000], "direction": "increase", "drop": False},
+        
+        #--------------------performanec-----------------------
+        "busy": {"change": [0,25], "direction": "increase", "drop": False},
+        "latency": {"change":[0,2000], "direction": "increase", "drop": False},
+        "throughput": {"change": [0, 1400000], "direction": "increase", "drop": False},
+        
+        #----------------------------------------------------------------------
+        "readtowrite_ops": {"drop": True},
+        "readtowrite_bps": {"drop": True},
+        
+        #-----------------------rate life scenarios------------------------------------------------
+        
+        "rated_life_used": {"change": [0,20], "direction": "increase", "drop": False},
+        "spare_blocks_consumed": {"change": [0,20], "direction": "increase", "drop": False},
+        "power_on_hours": {"change": [50757,50800], "direction": "increase", "drop": False},
+        "disk_errors": {"change": [0,3], "direction": "increase", "drop": False},
+        
+        #-------------------------------------------------------------------------------------
+        #--------------------------temparature scenarios------------------
+        "Hardware Health_Hardware Health_NVDIMM0 Health": {"change": 3, "direction": "increase", "drop": False},
+        "Hardware Health_Hardware Health_NVDIMM1 Health": {"change": 3, "direction": "increase", "drop": False},
+        "Fan Speed_Fan_Fan1": {"change": 3, "direction": "increase", "drop": False},
+        "Fan Speed_Fan_Fan2": {"change": 3, "direction": "increase", "drop": False},
+        "Fan Speed_Fan_Fan3": {"change": 3, "direction": "increase", "drop": False},
+        "Fan Speed_Fan_Fan4": {"change": 3, "direction": "increase", "drop": False},
+        "Fan Speed_Fan_Fan5": {"change": 3, "direction": "increase", "drop": False},
+        "Fan Speed_Fan_Fan6": {"change": 3, "direction": "increase", "drop": False},
+        "Fan Speed_Fan_Fan7": {"change": 3, "direction": "increase", "drop": False},
+        "Fan Speed_Fan_Fan8": {"change": 3, "direction": "increase", "drop": False},
+        "Fan Speed_Fan_Fan9": {"change": 3, "direction": "increase", "drop": False},
+        "Fan Speed_Fan_Fan10": {"change": 3, "direction": "increase", "drop": False},
+        "Voltage_Voltage_PSU1 Volt In": {"change": 3, "direction": "increase", "drop": False},
+        "Current Consumption_Current_PSU1 Curr In": {"change": 3, "direction": "increase", "drop": False},
+        "Fan Speed_Fan_PSU1 FAN": {"change": 3, "direction": "increase", "drop": False},
+        "Voltage_Voltage_PSU1 Volt Out": {"change": 3, "direction": "increase", "drop": False},
+        "Current Consumption_Current_PSU1 Curr Out": {"change":3, "direction": "increase", "drop": False},
+        "Voltage_Voltage_PSU2 Volt In": {"change": 3, "direction": "increase", "drop": False},
+        "Current Consumption_Current_PSU2 Curr In": {"change": 3, "direction": "increase", "drop": False},
+        "Fan Speed_Fan_PSU2 FAN": {"change":3, "direction": "increase", "drop": False},
+        "Voltage_Voltage_PSU2 Volt Out": {"change": 3, "direction": "increase", "drop": False},
+        "Current Consumption_Current_PSU2 Curr Out": {"change": 3, "direction": "increase", "drop": False},
+        "Controller Board Temperature_Controller Temperature_LED Board Temp1": {"change": 3, "direction": "increase", "drop": False},
+        "Controller Board Temperature_Controller Temperature_LED Board Temp2": {"change": 3, "direction": "increase", "drop": False},
+        "CPU Temperature_CPU Temperature_CPU0 Temp Margin": {"drop": True},
+        "CPU Temperature_CPU Temperature_CPU1 Temp Margin": {"drop": True},
+        "CPU Temperature_CPU Temperature_CPU0 Core Temp": {"drop": True},
+        "CPU Temperature_CPU Temperature_CPU1 Core Temp": {"drop": True},
+        
+        #-------------------------------------------------------------------------------------------
+        
+        #--------------------------dropped---------------------------
+        "Hardware Health_Hardware Health_Bat Present": {"drop": True},
+
+        "prefailed": {"change": [0, 8], "direction": "increase", "drop": True},
+        "replace": {"change": [0, 8], "direction": "increase", "drop": True},
+        "zero": {"change": [0, 8], "direction": "increase", "drop": True},
+        "copy_percent": {"drop": True},
+        "zero_percent": {"drop": True},
+        "reconstruction_percent": {"drop": True},
+        "Volume Footprints": {"drop": True},
+        "Aggregate Metadata": {"drop": True},
+        "Snapshot Reserve": {"drop": True},
+        "Total Used": {"drop": True},
+        "Total Physical Used": {"drop": True},
+        "Total Provisioned Space": {"drop": True},
+        "replication_relationships": {"drop": True},
+    },
+    output_fields={
+        "failure_probability": {"change": [0, 1], "direction": "increase", "drop": False},
+        "failure": {"change": [0, 1], "direction": "increase", "drop": True},
+    },
+    num_samples=5000,
+    result_path="result.json",
+)
+
+print(samples)
