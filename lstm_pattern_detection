@@ -1,0 +1,2579 @@
+import os
+import json
+import pickle
+import warnings
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+from tensorflow.keras import Model
+from tensorflow.keras.layers import Input, LSTM, Dense, Dropout
+from tensorflow.keras.callbacks import (
+    EarlyStopping,
+    ReduceLROnPlateau,
+    ModelCheckpoint,
+)
+from tensorflow.keras.optimizers import Adam
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+SEED = 42
+
+np.random.seed(SEED)
+tf.random.set_seed(SEED)
+
+warnings.filterwarnings("ignore")
+
+
+TRAIN_FILE = "./data/timeseries_storage_data2.xlsx"
+
+FEATURE_SCHEMA_FILE = "./data/feature_schema.json"
+
+MODEL_DIR = "./failure_probability_model"
+
+MODEL_FILE = os.path.join(
+    MODEL_DIR,
+    "failure_probability_lstm.keras"
+)
+
+SCALER_FILE = os.path.join(
+    MODEL_DIR,
+    "feature_scaler.pkl"
+)
+
+METADATA_FILE = os.path.join(
+    MODEL_DIR,
+    "metadata.json"
+)
+
+
+# ============================================================
+# COLUMN DEFINITIONS
+# ============================================================
+
+TARGET_COLUMN = "failure_probability"
+
+TIMESTAMP_COLUMN = "timestamp"
+
+IDENTIFIER_COLUMNS = [
+    "disk_name"
+]
+
+EXCLUDED_COLUMNS = [
+    "failure",
+    "failure_type"
+]
+
+
+# ============================================================
+# LSTM CONFIGURATION
+# ============================================================
+
+WINDOW_SIZE = 30
+
+LSTM_UNITS_1 = 128
+LSTM_UNITS_2 = 64
+
+DROPOUT = 0.2
+
+LEARNING_RATE = 0.001
+
+BATCH_SIZE = 64
+
+EPOCHS = 40
+
+VALIDATION_RATIO = 0.20
+
+
+# ============================================================
+# COLUMN NORMALIZATION
+# ============================================================
+
+def normalize_column_name(column):
+    """
+    Normalize column names for comparison.
+
+    This is ONLY used for matching.
+
+    The original schema names are preserved for
+    dataframe access.
+    """
+
+    return (
+        str(column)
+        .strip()
+        .lower()
+        .replace(" ", "_")
+        .replace("-", "_")
+    )
+
+
+def create_column_mapping(df):
+    """
+    Create:
+
+        normalized_name -> actual dataframe column name
+    """
+
+    mapping = {}
+
+    for column in df.columns:
+
+        normalized = normalize_column_name(
+            column
+        )
+
+        mapping[normalized] = column
+
+    return mapping
+
+
+# ============================================================
+# LOAD FEATURE SCHEMA
+# ============================================================
+
+def load_feature_schema(schema_file):
+    """
+    Load YOUR exact feature_schema.json structure.
+
+    Example:
+
+    {
+        "all_column_count": 39,
+        "all_columns": [...],
+        "feature_count": 38,
+        "feature_columns": [...],
+        "timestamp_columns": ["timestamp"],
+        "identifier_columns": ["disk_name"],
+        "target_column": "failure_probability",
+        "excluded_columns": ["failure", "failure_type"]
+    }
+
+    The final model features are obtained as:
+
+        feature_columns
+            -
+        target_column
+            -
+        timestamp_columns
+            -
+        identifier_columns
+            -
+        excluded_columns
+    """
+
+    schema_file = Path(schema_file)
+
+    if not schema_file.exists():
+
+        raise FileNotFoundError(
+            f"Schema file not found:\n{schema_file}"
+        )
+
+    with open(
+        schema_file,
+        "r",
+        encoding="utf-8"
+    ) as file:
+
+        schema = json.load(file)
+
+    # ========================================================
+    # Validate schema structure
+    # ========================================================
+
+    required_schema_keys = [
+        "feature_columns",
+        "timestamp_columns",
+        "identifier_columns",
+        "target_column",
+        "excluded_columns",
+    ]
+
+    for key in required_schema_keys:
+
+        if key not in schema:
+
+            raise ValueError(
+                f"Missing '{key}' in feature schema."
+            )
+
+    # ========================================================
+    # Read schema fields
+    # ========================================================
+
+    schema_features = schema[
+        "feature_columns"
+    ]
+
+    timestamp_columns = schema[
+        "timestamp_columns"
+    ]
+
+    identifier_columns = schema[
+        "identifier_columns"
+    ]
+
+    target_column = schema[
+        "target_column"
+    ]
+
+    excluded_columns = schema[
+        "excluded_columns"
+    ]
+
+    # ========================================================
+    # Normalize only for comparison
+    # ========================================================
+
+    schema_features_normalized = [
+        normalize_column_name(x)
+        for x in schema_features
+    ]
+
+    timestamp_normalized = {
+        normalize_column_name(x)
+        for x in timestamp_columns
+    }
+
+    identifier_normalized = {
+        normalize_column_name(x)
+        for x in identifier_columns
+    }
+
+    excluded_normalized = {
+        normalize_column_name(x)
+        for x in excluded_columns
+    }
+
+    target_normalized = normalize_column_name(
+        target_column
+    )
+
+    # ========================================================
+    # IMPORTANT:
+    #
+    # Remove target/timestamp/identifier/excluded columns
+    # from the actual LSTM input features.
+    # ========================================================
+
+    input_features = []
+
+    for feature in schema_features:
+
+        normalized = normalize_column_name(
+            feature
+        )
+
+        if normalized == target_normalized:
+            continue
+
+        if normalized in timestamp_normalized:
+            continue
+
+        if normalized in identifier_normalized:
+            continue
+
+        if normalized in excluded_normalized:
+            continue
+
+        input_features.append(
+            feature
+        )
+
+    # ========================================================
+    # Safety checks
+    # ========================================================
+
+    input_normalized = {
+        normalize_column_name(x)
+        for x in input_features
+    }
+
+    if target_normalized in input_normalized:
+
+        raise RuntimeError(
+            "CRITICAL ERROR: target column "
+            f"'{target_column}' is present "
+            "in LSTM input features."
+        )
+
+    if any(
+        normalize_column_name(x)
+        in input_normalized
+        for x in timestamp_columns
+    ):
+
+        raise RuntimeError(
+            "CRITICAL ERROR: timestamp column "
+            "is present in LSTM input features."
+        )
+
+    if any(
+        normalize_column_name(x)
+        in input_normalized
+        for x in identifier_columns
+    ):
+
+        raise RuntimeError(
+            "CRITICAL ERROR: identifier column "
+            "is present in LSTM input features."
+        )
+
+    # ========================================================
+    # Display
+    # ========================================================
+
+    print(
+        "\n"
+        + "=" * 70
+    )
+
+    print(
+        "FEATURE SCHEMA"
+    )
+
+    print(
+        "=" * 70
+    )
+
+    print(
+        f"Schema all columns : "
+        f"{schema.get('all_column_count')}"
+    )
+
+    print(
+        f"Schema features    : "
+        f"{schema.get('feature_count')}"
+    )
+
+    print(
+        f"Target             : "
+        f"{target_column}"
+    )
+
+    print(
+        f"Timestamp columns  : "
+        f"{timestamp_columns}"
+    )
+
+    print(
+        f"Identifier columns : "
+        f"{identifier_columns}"
+    )
+
+    print(
+        f"Excluded columns   : "
+        f"{excluded_columns}"
+    )
+
+    print(
+        "\nActual LSTM input features:"
+    )
+
+    print(
+        f"Number of inputs: "
+        f"{len(input_features)}"
+    )
+
+    for index, feature in enumerate(
+        input_features,
+        start=1
+    ):
+
+        print(
+            f"{index:3d}. {feature}"
+        )
+
+    return {
+        "input_features": input_features,
+        "target_column": target_column,
+        "timestamp_columns": timestamp_columns,
+        "identifier_columns": identifier_columns,
+        "excluded_columns": excluded_columns,
+    }
+
+
+# ============================================================
+# LOAD DATA FILE
+# ============================================================
+
+def load_txt_file(file_path):
+
+    attempts = [
+        {"sep": None, "engine": "python"},
+        {"sep": ","},
+        {"sep": "\t"},
+        {"sep": "|"},
+    ]
+
+    last_error = None
+
+    for options in attempts:
+
+        try:
+
+            df = pd.read_csv(
+                file_path,
+                **options
+            )
+
+            if df.shape[1] > 1:
+
+                return df
+
+        except Exception as exc:
+
+            last_error = exc
+
+    raise ValueError(
+        f"Unable to read TXT file:\n"
+        f"{file_path}\n"
+        f"Last error: {last_error}"
+    )
+
+
+def load_data_file(file_path):
+
+    file_path = Path(file_path)
+
+    if not file_path.exists():
+
+        raise FileNotFoundError(
+            f"File not found:\n{file_path}"
+        )
+
+    extension = file_path.suffix.lower()
+
+    print(
+        f"\nLoading file:\n{file_path}"
+    )
+
+    if extension in [".xlsx", ".xls"]:
+
+        df = pd.read_excel(
+            file_path
+        )
+
+    elif extension == ".csv":
+
+        df = pd.read_csv(
+            file_path
+        )
+
+    elif extension == ".txt":
+
+        df = load_txt_file(
+            file_path
+        )
+
+    else:
+
+        raise ValueError(
+            f"Unsupported file format: "
+            f"{extension}"
+        )
+
+    if df.empty:
+
+        raise ValueError(
+            "Input file contains no rows."
+        )
+
+    print(
+        f"Loaded {len(df)} rows and "
+        f"{len(df.columns)} columns."
+    )
+
+    return df
+
+
+# ============================================================
+# MAP DATAFRAME COLUMNS TO SCHEMA
+# ============================================================
+
+def map_schema_columns_to_dataframe(
+    df,
+    schema_columns
+):
+    """
+    Match schema columns against dataframe columns
+    without destroying the original column names.
+
+    This allows small formatting differences such as:
+
+        "Read IOPS"
+        "read_iops"
+
+    to be matched.
+    """
+
+    df_mapping = create_column_mapping(
+        df
+    )
+
+    resolved = {}
+
+    missing = []
+
+    for schema_column in schema_columns:
+
+        normalized = normalize_column_name(
+            schema_column
+        )
+
+        if normalized in df_mapping:
+
+            resolved[
+                schema_column
+            ] = df_mapping[
+                normalized
+            ]
+
+        else:
+
+            missing.append(
+                schema_column
+            )
+
+    return resolved, missing
+
+
+# ============================================================
+# VALIDATE TRAINING FILE
+# ============================================================
+
+def validate_training_file(
+    df,
+    schema_info
+):
+
+    input_features = schema_info[
+        "input_features"
+    ]
+
+    target_column = schema_info[
+        "target_column"
+    ]
+
+    timestamp_columns = schema_info[
+        "timestamp_columns"
+    ]
+
+    identifier_columns = schema_info[
+        "identifier_columns"
+    ]
+
+    # --------------------------------------------------------
+    # Required model columns
+    # --------------------------------------------------------
+
+    required_columns = (
+        input_features
+        + [target_column]
+    )
+
+    # --------------------------------------------------------
+    # Optional columns
+    # --------------------------------------------------------
+
+    optional_columns = (
+        timestamp_columns
+        + identifier_columns
+    )
+
+    all_schema_columns = (
+        required_columns
+        + optional_columns
+    )
+
+    resolved, missing = (
+        map_schema_columns_to_dataframe(
+            df,
+            all_schema_columns
+        )
+    )
+
+    # --------------------------------------------------------
+    # Missing required columns
+    # --------------------------------------------------------
+
+    missing_required = [
+        column
+        for column in missing
+        if column in required_columns
+    ]
+
+    if missing_required:
+
+        print(
+            "\nMissing required columns:"
+        )
+
+        for column in missing_required:
+
+            print(
+                f"  - {column}"
+            )
+
+        raise ValueError(
+            "Training file does not contain "
+            "all required schema features."
+        )
+
+    # --------------------------------------------------------
+    # Information
+    # --------------------------------------------------------
+
+    print(
+        "\n"
+        + "=" * 70
+    )
+
+    print(
+        "TRAINING FILE VALIDATION"
+    )
+
+    print(
+        "=" * 70
+    )
+
+    print(
+        f"Total columns in file : "
+        f"{len(df.columns)}"
+    )
+
+    print(
+        f"Required model inputs : "
+        f"{len(input_features)}"
+    )
+
+    print(
+        f"Target                : "
+        f"{target_column}"
+    )
+
+    # --------------------------------------------------------
+    # Extra columns are intentionally ignored
+    # --------------------------------------------------------
+
+    schema_normalized = {
+        normalize_column_name(x)
+        for x in all_schema_columns
+    }
+
+    extra_columns = [
+        column
+        for column in df.columns
+        if normalize_column_name(column)
+        not in schema_normalized
+    ]
+
+    print(
+        f"Extra columns ignored  : "
+        f"{len(extra_columns)}"
+    )
+
+    if extra_columns:
+
+        print(
+            "\nExtra columns:"
+        )
+
+        for column in extra_columns:
+
+            print(
+                f"  - {column}"
+            )
+
+    return resolved
+
+
+# ============================================================
+# PREPARE DATAFRAME USING SCHEMA
+# ============================================================
+
+def prepare_training_dataframe(
+    df,
+    schema_info
+):
+
+    input_features = schema_info[
+        "input_features"
+    ]
+
+    target_column = schema_info[
+        "target_column"
+    ]
+
+    timestamp_columns = schema_info[
+        "timestamp_columns"
+    ]
+
+    identifier_columns = schema_info[
+        "identifier_columns"
+    ]
+
+    resolved, _ = (
+        map_schema_columns_to_dataframe(
+            df,
+            input_features
+            + [target_column]
+            + timestamp_columns
+            + identifier_columns
+        )
+    )
+
+    # ========================================================
+    # Create a clean internal dataframe
+    #
+    # Keys are schema names.
+    # ========================================================
+
+    clean = pd.DataFrame(
+        index=df.index
+    )
+
+    # --------------------------------------------------------
+    # Input features
+    # --------------------------------------------------------
+
+    for feature in input_features:
+
+        actual_column = resolved[
+            feature
+        ]
+
+        clean[feature] = pd.to_numeric(
+            df[actual_column],
+            errors="coerce"
+        )
+
+    # --------------------------------------------------------
+    # Target
+    # --------------------------------------------------------
+
+    actual_target = resolved[
+        target_column
+    ]
+
+    clean[target_column] = pd.to_numeric(
+        df[actual_target],
+        errors="coerce"
+    )
+
+    # --------------------------------------------------------
+    # Timestamp
+    # --------------------------------------------------------
+
+    for timestamp in timestamp_columns:
+
+        if timestamp in resolved:
+
+            actual_column = resolved[
+                timestamp
+            ]
+
+            clean[timestamp] = pd.to_datetime(
+                df[actual_column],
+                errors="coerce"
+            )
+
+    # --------------------------------------------------------
+    # Identifier
+    # --------------------------------------------------------
+
+    for identifier in identifier_columns:
+
+        if identifier in resolved:
+
+            actual_column = resolved[
+                identifier
+            ]
+
+            clean[identifier] = (
+                df[actual_column]
+                .astype(str)
+                .str.strip()
+            )
+
+    return clean
+
+
+# ============================================================
+# CLEAN DATA
+# ============================================================
+
+def clean_training_data(
+    df,
+    schema_info
+):
+
+    input_features = schema_info[
+        "input_features"
+    ]
+
+    target_column = schema_info[
+        "target_column"
+    ]
+
+    timestamp_columns = schema_info[
+        "timestamp_columns"
+    ]
+
+    identifier_columns = schema_info[
+        "identifier_columns"
+    ]
+
+    # ========================================================
+    # Target validation
+    # ========================================================
+
+    invalid_target = (
+        df[target_column].isna()
+        |
+        (df[target_column] < 0)
+        |
+        (df[target_column] > 1)
+    )
+
+    invalid_count = int(
+        invalid_target.sum()
+    )
+
+    if invalid_count:
+
+        print(
+            f"\nRemoving {invalid_count} rows "
+            "with invalid failure_probability."
+        )
+
+        df = df.loc[
+            ~invalid_target
+        ].copy()
+
+    # ========================================================
+    # Sort chronologically
+    # ========================================================
+
+    sort_columns = []
+
+    if identifier_columns:
+
+        identifier = identifier_columns[0]
+
+        if identifier in df.columns:
+
+            sort_columns.append(
+                identifier
+            )
+
+    if timestamp_columns:
+
+        timestamp = timestamp_columns[0]
+
+        if timestamp in df.columns:
+
+            sort_columns.append(
+                timestamp
+            )
+
+    if sort_columns:
+
+        df = df.sort_values(
+            sort_columns
+        )
+
+    # ========================================================
+    # Fill missing feature values PER DISK
+    # ========================================================
+
+    if identifier_columns:
+
+        identifier = identifier_columns[0]
+
+        if identifier in df.columns:
+
+            df[input_features] = (
+                df.groupby(
+                    identifier,
+                    sort=False
+                )[input_features]
+                .transform(
+                    lambda x:
+                    x.ffill().bfill()
+                )
+            )
+
+    else:
+
+        df[input_features] = (
+            df[input_features]
+            .ffill()
+            .bfill()
+        )
+
+    # ========================================================
+    # Remove rows still containing missing features
+    # ========================================================
+
+    before = len(df)
+
+    df = df.dropna(
+        subset=input_features
+    )
+
+    removed = (
+        before - len(df)
+    )
+
+    if removed:
+
+        print(
+            f"Removed {removed} rows with "
+            "invalid input features."
+        )
+
+    df = df.reset_index(
+        drop=True
+    )
+
+    return df
+
+
+# ============================================================
+# SPLIT EACH DISK CHRONOLOGICALLY
+# ============================================================
+
+def split_by_disk_history(
+    df,
+    schema_info,
+    validation_ratio=0.20
+):
+
+    identifier_columns = schema_info[
+        "identifier_columns"
+    ]
+
+    timestamp_columns = schema_info[
+        "timestamp_columns"
+    ]
+
+    train_parts = []
+    val_parts = []
+
+    # ========================================================
+    # Disk identifier available
+    # ========================================================
+
+    if identifier_columns:
+
+        identifier = identifier_columns[0]
+
+        if identifier in df.columns:
+
+            for disk_name, group in df.groupby(
+                identifier,
+                sort=False
+            ):
+
+                group = group.copy()
+
+                if timestamp_columns:
+
+                    timestamp = (
+                        timestamp_columns[0]
+                    )
+
+                    if timestamp in group.columns:
+
+                        group = group.sort_values(
+                            timestamp
+                        )
+
+                if len(group) < 2:
+
+                    continue
+
+                split_index = int(
+                    len(group)
+                    * (1.0 - validation_ratio)
+                )
+
+                split_index = max(
+                    1,
+                    min(
+                        split_index,
+                        len(group) - 1
+                    )
+                )
+
+                train_parts.append(
+                    group.iloc[
+                        :split_index
+                    ]
+                )
+
+                val_parts.append(
+                    group.iloc[
+                        split_index:
+                    ]
+                )
+
+    # ========================================================
+    # No disk identifier
+    # ========================================================
+
+    else:
+
+        group = df.copy()
+
+        if timestamp_columns:
+
+            timestamp = (
+                timestamp_columns[0]
+            )
+
+            if timestamp in group.columns:
+
+                group = group.sort_values(
+                    timestamp
+                )
+
+        split_index = int(
+            len(group)
+            * (1.0 - validation_ratio)
+        )
+
+        train_parts.append(
+            group.iloc[
+                :split_index
+            ]
+        )
+
+        val_parts.append(
+            group.iloc[
+                split_index:
+            ]
+        )
+
+    # ========================================================
+    # Verify
+    # ========================================================
+
+    if not train_parts:
+
+        raise ValueError(
+            "Could not create training split."
+        )
+
+    train_df = pd.concat(
+        train_parts,
+        ignore_index=True
+    )
+
+    val_df = pd.concat(
+        val_parts,
+        ignore_index=True
+    )
+
+    return (
+        train_df,
+        val_df
+    )
+
+
+# ============================================================
+# SCALER
+# ============================================================
+
+def fit_scaler(
+    train_df,
+    input_features
+):
+
+    scaler = MinMaxScaler()
+
+    scaler.fit(
+        train_df[input_features]
+    )
+
+    return scaler
+
+
+# ============================================================
+# CREATE SUPERVISED LSTM WINDOWS
+# ============================================================
+
+# def create_windows(
+#     df,
+#     schema_info,
+#     scaler,
+#     window_size
+# ):
+
+    
+#     input_features = schema_info[
+#         "input_features"
+#     ]
+
+#     target_column = schema_info[
+#         "target_column"
+#     ]
+
+#     identifier_columns = schema_info[
+#         "identifier_columns"
+#     ]
+
+#     timestamp_columns = schema_info[
+#         "timestamp_columns"
+#     ]
+
+#     X = []
+#     y = []
+
+#     # ========================================================
+#     # Group by disk
+#     # ========================================================
+
+#     if identifier_columns:
+
+#         identifier = identifier_columns[0]
+
+#         groups = df.groupby(
+#             identifier,
+#             sort=False
+#         )
+
+#     else:
+
+#         groups = [
+#             ("single_sequence", df)
+#         ]
+
+#     # ========================================================
+#     # Create windows
+#     # ========================================================
+
+#     for disk_name, group in groups:
+
+#         group = group.copy()
+
+#         # ----------------------------------------------------
+#         # Sort by timestamp
+#         # ----------------------------------------------------
+
+#         if timestamp_columns:
+
+#             timestamp = (
+#                 timestamp_columns[0]
+#             )
+
+#             if timestamp in group.columns:
+
+#                 group = group.sort_values(
+#                     timestamp
+#                 )
+
+#         group = group.reset_index(
+#             drop=True
+#         )
+
+#         # ----------------------------------------------------
+#         # Not enough rows
+#         # ----------------------------------------------------
+
+#         if len(group) < window_size:
+
+#             continue
+
+#         # ----------------------------------------------------
+#         # ONLY actual input features
+#         # ----------------------------------------------------
+
+#         feature_values = scaler.transform(
+#             group[input_features]
+#         ).astype(
+#             np.float32
+#         )
+
+#         target_values = group[
+#             target_column
+#         ].values.astype(
+#             np.float32
+#         )
+
+#         # ----------------------------------------------------
+#         # Sliding windows
+#         # ----------------------------------------------------
+
+#         for start in range(
+#             len(group) - window_size + 1
+#         ):
+
+#             end = (
+#                 start + window_size
+#             )
+
+#             X.append(
+#                 feature_values[
+#                     start:end
+#                 ]
+#             )
+
+#             # Target is the failure probability
+#             # corresponding to the final row.
+
+#             y.append(
+#                 target_values[
+#                     end - 1
+#                 ]
+#             )
+
+#     if not X:
+
+#         raise ValueError(
+#             "No valid windows were created."
+#         )
+
+#     X = np.asarray(
+#         X,
+#         dtype=np.float32
+#     )
+
+#     y = np.asarray(
+#         y,
+#         dtype=np.float32
+#     )
+
+#     return X, y
+
+
+# ============================================================
+# CREATE SUPERVISED LSTM WINDOWS
+# ============================================================
+
+def create_windows(
+    df,
+    schema_info,
+    scaler,
+    window_size
+):
+
+    input_features = schema_info[
+        "input_features"
+    ]
+
+    target_column = schema_info[
+        "target_column"
+    ]
+
+    timestamp_columns = schema_info[
+        "timestamp_columns"
+    ]
+
+    X = []
+    y = []
+
+    # ========================================================
+    # IMPORTANT:
+    #
+    # Do NOT group by disk_name here.
+    #
+    # The dataframe is treated as ONE continuous
+    # time-series sequence.
+    #
+    # Window creation is based ONLY on row position.
+    # ========================================================
+
+    df = df.copy()
+
+    # --------------------------------------------------------
+    # Sort by timestamp
+    # --------------------------------------------------------
+
+    if timestamp_columns:
+
+        timestamp = timestamp_columns[0]
+
+        if timestamp in df.columns:
+
+            df = df.sort_values(
+                timestamp
+            )
+
+    # --------------------------------------------------------
+    # Reset row numbers after sorting
+    # --------------------------------------------------------
+
+    df = df.reset_index(
+        drop=True
+    )
+
+    # ========================================================
+    # Check whether enough rows exist
+    # ========================================================
+
+    if len(df) < window_size:
+
+        raise ValueError(
+            f"Not enough rows to create windows.\n"
+            f"Rows available : {len(df)}\n"
+            f"Window size    : {window_size}"
+        )
+
+    # ========================================================
+    # Get input features
+    #
+    # Only schema-defined LSTM features are used.
+    # disk_name, timestamp and target are NOT inputs.
+    # ========================================================
+
+    feature_values = scaler.transform(
+        df[input_features]
+    ).astype(
+        np.float32
+    )
+
+    # ========================================================
+    # Get target values
+    # ========================================================
+
+    target_values = df[
+        target_column
+    ].values.astype(
+        np.float32
+    )
+
+    # ========================================================
+    # Sliding window based ONLY on row count
+    # ========================================================
+
+    for start in range(
+        len(df) - window_size + 1
+    ):
+
+        end = (
+            start + window_size
+        )
+
+        # ----------------------------------------------------
+        # 10 rows × number of input features
+        # ----------------------------------------------------
+
+        window = feature_values[
+            start:end
+        ]
+
+        X.append(
+            window
+        )
+
+        # ----------------------------------------------------
+        # Target corresponding to the LAST row
+        # ----------------------------------------------------
+
+        y.append(
+            target_values[
+                end - 1
+            ]
+        )
+
+    # ========================================================
+    # Convert to NumPy
+    # ========================================================
+
+    X = np.asarray(
+        X,
+        dtype=np.float32
+    )
+
+    y = np.asarray(
+        y,
+        dtype=np.float32
+    )
+
+    # ========================================================
+    # Safety check
+    # ========================================================
+
+    if X.shape[0] == 0:
+
+        raise ValueError(
+            "No valid LSTM windows were created."
+        )
+
+    print(
+        "\n"
+        + "=" * 70
+    )
+
+    print(
+        "WINDOW CREATION"
+    )
+
+    print(
+        "=" * 70
+    )
+
+    print(
+        f"Total rows       : {len(df)}"
+    )
+
+    print(
+        f"Window size      : {window_size}"
+    )
+
+    print(
+        f"Input features   : {len(input_features)}"
+    )
+
+    print(
+        f"Windows created  : {len(X)}"
+    )
+
+    print(
+        f"X shape          : {X.shape}"
+    )
+
+    print(
+        f"y shape          : {y.shape}"
+    )
+
+    return X, y
+
+# ============================================================
+# BUILD LSTM
+# ============================================================
+
+def build_model(
+    window_size,
+    feature_count
+):
+
+    inputs = Input(
+        shape=(
+            window_size,
+            feature_count
+        ),
+        name="input_features"
+    )
+
+    x = LSTM(
+        LSTM_UNITS_1,
+        return_sequences=True
+    )(inputs)
+
+    x = Dropout(
+        DROPOUT
+    )(x)
+
+    x = LSTM(
+        LSTM_UNITS_2,
+        return_sequences=False
+    )(x)
+
+    x = Dropout(
+        DROPOUT
+    )(x)
+
+    x = Dense(
+        32,
+        activation="relu"
+    )(x)
+
+    outputs = Dense(
+        1,
+        activation="sigmoid",
+        name="failure_probability"
+    )(x)
+
+    model = Model(
+        inputs=inputs,
+        outputs=outputs
+    )
+
+    model.compile(
+        optimizer=Adam(
+            learning_rate=LEARNING_RATE,
+            clipnorm=1.0
+        ),
+        loss=tf.keras.losses.Huber(),
+        metrics=[
+            tf.keras.metrics.MeanAbsoluteError(
+                name="mae"
+            ),
+            tf.keras.metrics.RootMeanSquaredError(
+                name="rmse"
+            ),
+        ]
+    )
+
+    return model
+
+
+# ============================================================
+# TRAIN
+# ============================================================
+
+def train_model():
+
+    os.makedirs(
+        MODEL_DIR,
+        exist_ok=True
+    )
+
+    # ========================================================
+    # 1. Read schema
+    # ========================================================
+
+    schema_info = load_feature_schema(
+        FEATURE_SCHEMA_FILE
+    )
+
+    input_features = schema_info[
+        "input_features"
+    ]
+
+    target_column = schema_info[
+        "target_column"
+    ]
+
+    # ========================================================
+    # 2. Load training file
+    # ========================================================
+
+    raw_df = load_data_file(
+        TRAIN_FILE
+    )
+
+    # ========================================================
+    # 3. Validate
+    # ========================================================
+
+    validate_training_file(
+        raw_df,
+        schema_info
+    )
+
+    # ========================================================
+    # 4. Convert into schema-controlled dataframe
+    # ========================================================
+
+    df = prepare_training_dataframe(
+        raw_df,
+        schema_info
+    )
+
+    # ========================================================
+    # 5. Clean
+    # ========================================================
+
+    df = clean_training_data(
+        df,
+        schema_info
+    )
+
+    print(
+        f"\nRows after cleaning: "
+        f"{len(df)}"
+    )
+
+    if len(df) == 0:
+
+        raise ValueError(
+            "No rows remain after cleaning."
+        )
+
+    # ========================================================
+    # 6. Split
+    # ========================================================
+
+    train_df, val_df = (
+        split_by_disk_history(
+            df,
+            schema_info,
+            VALIDATION_RATIO
+        )
+    )
+
+    print(
+        f"\nTraining rows: "
+        f"{len(train_df)}"
+    )
+
+    print(
+        f"Validation rows: "
+        f"{len(val_df)}"
+    )
+
+    # ========================================================
+    # 7. Fit scaler ONLY on training data
+    # ========================================================
+
+    scaler = fit_scaler(
+        train_df,
+        input_features
+    )
+
+    with open(
+        SCALER_FILE,
+        "wb"
+    ) as f:
+
+        pickle.dump(
+            scaler,
+            f
+        )
+
+    # ========================================================
+    # 8. Windows
+    # ========================================================
+
+    X_train, y_train = create_windows(
+        train_df,
+        schema_info,
+        scaler,
+        WINDOW_SIZE
+    )
+
+    X_val, y_val = create_windows(
+        val_df,
+        schema_info,
+        scaler,
+        WINDOW_SIZE
+    )
+
+    # ========================================================
+    # 9. Print shapes
+    # ========================================================
+
+    print(
+        "\n"
+        + "=" * 70
+    )
+
+    print(
+        "FINAL TRAINING DATA"
+    )
+
+    print(
+        "=" * 70
+    )
+
+    print(
+        f"Number of input features : "
+        f"{len(input_features)}"
+    )
+
+    print(
+        f"Window size              : "
+        f"{WINDOW_SIZE}"
+    )
+
+    print(
+        f"X_train                  : "
+        f"{X_train.shape}"
+    )
+
+    print(
+        f"y_train                  : "
+        f"{y_train.shape}"
+    )
+
+    print(
+        f"X_val                    : "
+        f"{X_val.shape}"
+    )
+
+    print(
+        f"y_val                    : "
+        f"{y_val.shape}"
+    )
+
+    print(
+        f"\nTarget: {target_column}"
+    )
+
+    print(
+        f"Target min: {y_train.min():.6f}"
+    )
+
+    print(
+        f"Target max: {y_train.max():.6f}"
+    )
+
+    # ========================================================
+    # 10. Build model
+    # ========================================================
+
+    model = build_model(
+        WINDOW_SIZE,
+        len(input_features)
+    )
+
+    print(
+        "\nModel input shape:"
+    )
+
+    print(
+        model.input_shape
+    )
+
+    print(
+        "Model output shape:"
+    )
+
+    print(
+        model.output_shape
+    )
+
+    # ========================================================
+    # 11. Callbacks
+    # ========================================================
+
+    checkpoint = ModelCheckpoint(
+        MODEL_FILE,
+        monitor="val_loss",
+        mode="min",
+        save_best_only=True,
+        verbose=1
+    )
+
+    early_stopping = EarlyStopping(
+        monitor="val_loss",
+        mode="min",
+        patience=12,
+        restore_best_weights=True,
+        verbose=1
+    )
+
+    reduce_lr = ReduceLROnPlateau(
+        monitor="val_loss",
+        mode="min",
+        factor=0.5,
+        patience=5,
+        min_lr=1e-6,
+        verbose=1
+    )
+
+    # ========================================================
+    # 12. Train
+    # ========================================================
+
+    history = model.fit(
+        X_train,
+        y_train,
+        validation_data=(
+            X_val,
+            y_val
+        ),
+        epochs=EPOCHS,
+        batch_size=BATCH_SIZE,
+
+        # Important for time-series
+        shuffle=False,
+
+        callbacks=[
+            checkpoint,
+            early_stopping,
+            reduce_lr,
+        ],
+
+        verbose=1
+    )
+
+    # ========================================================
+    # 13. Save metadata
+    # ========================================================
+
+    metadata = {
+
+        "feature_schema_file":
+            FEATURE_SCHEMA_FILE,
+
+        "target_column":
+            target_column,
+
+        "input_features":
+            input_features,
+
+        "input_feature_count":
+            len(input_features),
+
+        "window_size":
+            WINDOW_SIZE,
+
+        "timestamp_columns":
+            schema_info[
+                "timestamp_columns"
+            ],
+
+        "identifier_columns":
+            schema_info[
+                "identifier_columns"
+            ],
+
+        "model_input_shape":
+            [
+                WINDOW_SIZE,
+                len(input_features)
+            ],
+
+        "model_output_shape":
+            [1],
+    }
+
+    with open(
+        METADATA_FILE,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        json.dump(
+            metadata,
+            f,
+            indent=4
+        )
+
+    # ========================================================
+    # 14. Validation prediction
+    # ========================================================
+
+    predictions = model.predict(
+        X_val,
+        batch_size=BATCH_SIZE,
+        verbose=0
+    ).reshape(-1)
+
+    predictions = np.clip(
+        predictions,
+        0.0,
+        1.0
+    )
+
+    mae = mean_absolute_error(
+        y_val,
+        predictions
+    )
+
+    rmse = np.sqrt(
+        mean_squared_error(
+            y_val,
+            predictions
+        )
+    )
+
+    print(
+        "\n"
+        + "=" * 70
+    )
+
+    print(
+        "VALIDATION RESULTS"
+    )
+
+    print(
+        "=" * 70
+    )
+
+    print(
+        f"MAE  : {mae:.6f}"
+    )
+
+    print(
+        f"RMSE : {rmse:.6f}"
+    )
+
+    print(
+        "\nSample:"
+    )
+
+    result = pd.DataFrame(
+        {
+            "actual_failure_probability":
+                y_val[:20],
+
+            "predicted_failure_probability":
+                predictions[:20]
+        }
+    )
+
+    print(
+        result.to_string(
+            index=False
+        )
+    )
+
+    print(
+        "\nTraining completed."
+    )
+
+    print(
+        f"Model  : {MODEL_FILE}"
+    )
+
+    print(
+        f"Scaler : {SCALER_FILE}"
+    )
+
+    print(
+        f"Metadata: {METADATA_FILE}"
+    )
+
+    return (
+        model,
+        scaler,
+        history
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+import os
+import json
+import joblib
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from tensorflow.keras.models import load_model
+
+
+# ============================================================
+# LOAD MODEL + SCALER + SCHEMA
+# ============================================================
+
+def load_prediction_artifacts(
+    model_dir="./failure_probability_model",
+    schema_path="./data/feature_schema.json"
+):
+    """
+    Load:
+        - trained LSTM model
+        - MinMaxScaler used during training
+        - feature schema
+    """
+
+    model_path = os.path.join(
+        model_dir,
+        "failure_probability_lstm.keras"
+    )
+
+    scaler_path = os.path.join(
+        model_dir,
+        "feature_scaler.pkl"
+    )
+
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(
+            f"Model not found: {model_path}"
+        )
+
+    if not os.path.exists(scaler_path):
+        raise FileNotFoundError(
+            f"Scaler not found: {scaler_path}"
+        )
+
+    if not os.path.exists(schema_path):
+        raise FileNotFoundError(
+            f"Schema not found: {schema_path}"
+        )
+
+    # Load trained model
+    model = load_model(
+        model_path
+    )
+
+    # Load the SAME scaler used during training
+    scaler = joblib.load(
+        scaler_path
+    )
+
+    # Load schema
+    with open(
+        schema_path,
+        "r"
+    ) as f:
+        schema_info = json.load(f)
+
+    print("\n" + "=" * 70)
+    print("PREDICTION ARTIFACTS LOADED")
+    print("=" * 70)
+
+    print(
+        f"Model path  : {model_path}"
+    )
+
+    print(
+        f"Scaler path : {scaler_path}"
+    )
+
+    print(
+        f"Input shape : {model.input_shape}"
+    )
+
+    print(
+        f"Output shape: {model.output_shape}"
+    )
+
+    return (
+        model,
+        scaler,
+        schema_info
+    )
+
+
+# ============================================================
+# LOAD 10 ROWS AND PREDICT
+# ============================================================
+def load_and_predict(
+    excel_path,
+    model_dir="./failure_probability_model",
+    schema_path="./data/feature_schema.json",
+    sample_size=10
+):
+    """
+    Load prediction Excel and apply EXACTLY the same preprocessing
+    that was used during LSTM training.
+
+    Training preprocessing:
+        1. timestamp -> Unix seconds
+        2. remove target / identifiers / excluded columns
+        3. pd.to_numeric(errors="coerce")
+        4. replace inf/-inf with NaN
+        5. linear interpolation
+        6. fill remaining NaN with 0
+        7. saved MinMaxScaler.transform()
+    """
+
+    # ========================================================
+    # LOAD MODEL, SCALER AND SCHEMA
+    # ========================================================
+
+    model, scaler, schema_info = load_prediction_artifacts(
+        model_dir
+    )
+
+    # ========================================================
+    # LOAD EXCEL
+    # ========================================================
+
+    df = pd.read_excel(
+        excel_path
+    )
+
+    if df.empty:
+        raise ValueError(
+            "Prediction Excel file is empty."
+        )
+
+    df.columns = (
+        df.columns
+        .astype(str)
+        .str.strip()
+    )
+
+    print("\n" + "=" * 80)
+    print("PREDICTION INPUT")
+    print("=" * 80)
+
+    print(
+        f"Rows    : {len(df)}"
+    )
+
+    print(
+        f"Columns : {len(df.columns)}"
+    )
+
+    # ========================================================
+    # SCHEMA INFORMATION
+    # ========================================================
+
+    schema_columns = schema_info.get(
+        "feature_columns",
+        []
+    )
+
+    if not schema_columns:
+        raise ValueError(
+            "feature_columns not found in schema."
+        )
+
+    target_column = schema_info.get(
+        "target_column",
+        "failure_probability"
+    )
+
+    timestamp_columns = schema_info.get(
+        "timestamp_columns",
+        ["timestamp"]
+    )
+
+    identifier_columns = schema_info.get(
+        "identifier_columns",
+        ["disk_name"]
+    )
+
+    excluded_columns = schema_info.get(
+        "excluded_columns",
+        ["failure", "failure_type"]
+    )
+
+    # ========================================================
+    # DETERMINE ACTUAL MODEL INPUT FEATURES
+    #
+    # EXACTLY LIKE TRAINING
+    # ========================================================
+
+    columns_to_exclude = set(
+        [target_column]
+        + timestamp_columns
+        + identifier_columns
+        + excluded_columns
+    )
+
+    input_features = [
+        column
+        for column in schema_columns
+        if column not in columns_to_exclude
+    ]
+
+    print(
+        f"\nModel input features: {len(input_features)}"
+    )
+
+    for column in input_features:
+        print(
+            f"  - {column}"
+        )
+
+    # ========================================================
+    # CHECK REQUIRED FEATURES
+    # ========================================================
+
+    missing_features = [
+        column
+        for column in input_features
+        if column not in df.columns
+    ]
+
+    if missing_features:
+
+        raise ValueError(
+            "Prediction Excel is missing required "
+            "training features:\n\n"
+            + "\n".join(
+                str(column)
+                for column in missing_features
+            )
+        )
+
+    # ========================================================
+    # TIMESTAMP
+    #
+    # EXACT SAME TRANSFORMATION AS TRAINING
+    # ========================================================
+
+    for column in timestamp_columns:
+
+        if column not in df.columns:
+            continue
+
+        timestamp_values = pd.to_datetime(
+            df[column],
+            errors="coerce"
+        )
+
+        numeric_timestamp = (
+            timestamp_values.astype("int64")
+            / 1_000_000_000
+        )
+
+        numeric_timestamp[
+            timestamp_values.isna()
+        ] = np.nan
+
+        df[column] = numeric_timestamp.astype(
+            "float64"
+        )
+
+    # ========================================================
+    # SORT BY TIMESTAMP
+    #
+    # Only for chronological ordering.
+    # Timestamp itself is NOT sent to the model.
+    # ========================================================
+
+    if timestamp_columns:
+
+        timestamp_column = timestamp_columns[0]
+
+        if timestamp_column in df.columns:
+
+            sort_timestamp = pd.to_datetime(
+                df[timestamp_column],
+                unit="s",
+                errors="coerce"
+            )
+
+            df["_sort_timestamp"] = sort_timestamp
+
+            df = (
+                df.sort_values(
+                    "_sort_timestamp"
+                )
+                .drop(
+                    columns=["_sort_timestamp"]
+                )
+                .reset_index(drop=True)
+            )
+
+    # ========================================================
+    # TAKE REQUIRED NUMBER OF ROWS
+    # ========================================================
+
+    window_size = int(
+        model.input_shape[1]
+    )
+
+    if sample_size is None:
+        sample_size = window_size
+
+    sample_size = int(sample_size)
+
+    # Use the latest rows if more rows are available
+    if len(df) >= sample_size:
+
+        sample_df = (
+            df.iloc[-sample_size:]
+            .copy()
+        )
+
+    else:
+
+        # ----------------------------------------------------
+        # If fewer than WINDOW_SIZE rows are available,
+        # repeat the first row at the beginning.
+        # ----------------------------------------------------
+
+        if len(df) == 0:
+            raise ValueError(
+                "No rows available for prediction."
+            )
+
+        rows_needed = (
+            window_size - len(df)
+        )
+
+        first_row = df.iloc[
+            [0]
+        ].copy()
+
+        padding = pd.concat(
+            [first_row] * rows_needed,
+            ignore_index=True
+        )
+
+        sample_df = pd.concat(
+            [
+                padding,
+                df
+            ],
+            ignore_index=True
+        )
+
+        print(
+            f"\nOnly {len(df)} rows available."
+        )
+
+        print(
+            f"Added {rows_needed} "
+            f"padding rows."
+        )
+
+    # Make absolutely sure we have the model window
+    if len(sample_df) > window_size:
+
+        sample_df = sample_df.iloc[
+            -window_size:
+        ].copy()
+
+    # ========================================================
+    # EXACT TRAINING FEATURE SELECTION
+    #
+    # IMPORTANT:
+    # Do NOT use disk_name
+    # Do NOT use target
+    # Do NOT use timestamp
+    # ========================================================
+
+    feature_df = (
+        sample_df[
+            input_features
+        ]
+        .copy()
+    )
+
+    print(
+        "\nRaw model feature dtypes:"
+    )
+
+    print(
+        feature_df.dtypes
+    )
+
+    # ========================================================
+    # EXACT SAME NUMERIC CONVERSION AS TRAINING
+    #
+    # This is the important part.
+    #
+    # Training uses:
+    #
+    # dataframe_to_numeric()
+    #
+    # which performs:
+    #
+    # pd.to_numeric(errors='coerce')
+    # interpolate()
+    # fillna(0)
+    # ========================================================
+
+    for column in feature_df.columns:
+
+        feature_df[column] = pd.to_numeric(
+            feature_df[column],
+            errors="coerce"
+        )
+
+    # ========================================================
+    # REPLACE INFINITY
+    # ========================================================
+
+    feature_df = feature_df.replace(
+        [np.inf, -np.inf],
+        np.nan
+    )
+
+    # ========================================================
+    # SAME INTERPOLATION AS TRAINING
+    # ========================================================
+
+    feature_df = feature_df.interpolate(
+        method="linear",
+        limit_direction="both"
+    )
+
+    # ========================================================
+    # SAME NaN HANDLING AS TRAINING
+    # ========================================================
+
+    feature_df = feature_df.fillna(
+        0
+    )
+
+    # ========================================================
+    # FINAL NUMERIC VALIDATION
+    # ========================================================
+
+    non_numeric_columns = [
+        column
+        for column in feature_df.columns
+        if not pd.api.types.is_numeric_dtype(
+            feature_df[column]
+        )
+    ]
+
+    if non_numeric_columns:
+
+        raise ValueError(
+            "Non-numeric columns remain after applying "
+            "the exact training preprocessing:\n"
+            + "\n".join(
+                non_numeric_columns
+            )
+        )
+
+    if feature_df.isna().any().any():
+
+        bad_columns = (
+            feature_df.columns[
+                feature_df.isna().any()
+            ]
+            .tolist()
+        )
+
+        raise ValueError(
+            "NaN values remain after preprocessing:\n"
+            + "\n".join(
+                bad_columns
+            )
+        )
+
+    # ========================================================
+    # CONVERT TO FLOAT32
+    # ========================================================
+
+    feature_values = (
+        feature_df
+        .values
+        .astype(np.float32)
+    )
+
+    print(
+        f"\nPreprocessed feature shape: "
+        f"{feature_values.shape}"
+    )
+
+    # ========================================================
+    # CHECK FEATURE COUNT
+    # ========================================================
+
+    expected_features = (
+        scaler.n_features_in_
+    )
+
+    actual_features = (
+        feature_values.shape[1]
+    )
+
+    if actual_features != expected_features:
+
+        raise ValueError(
+            f"Feature count mismatch.\n"
+            f"Training scaler expects: "
+            f"{expected_features}\n"
+            f"Prediction contains: "
+            f"{actual_features}\n\n"
+            f"Features used:\n"
+            + "\n".join(
+                input_features
+            )
+        )
+
+    # ========================================================
+    # SAME MINMAX SCALER USED DURING TRAINING
+    # ========================================================
+
+    X_scaled = scaler.transform(
+        feature_values
+    ).astype(
+        np.float32
+    )
+
+    # ========================================================
+    # LSTM INPUT
+    #
+    # (1, WINDOW_SIZE, FEATURES)
+    # ========================================================
+
+    X_input = X_scaled[
+        np.newaxis,
+        :,
+        :
+    ]
+
+    print(
+        f"LSTM input shape : "
+        f"{X_input.shape}"
+    )
+
+    print(
+        f"Model input shape: "
+        f"{model.input_shape}"
+    )
+
+    # ========================================================
+    # FINAL SHAPE CHECK
+    # ========================================================
+
+    if X_input.shape[1] != model.input_shape[1]:
+
+        raise ValueError(
+            f"Window size mismatch.\n"
+            f"Expected: {model.input_shape[1]}\n"
+            f"Received: {X_input.shape[1]}"
+        )
+
+    if X_input.shape[2] != model.input_shape[2]:
+
+        raise ValueError(
+            f"Feature count mismatch.\n"
+            f"Expected: {model.input_shape[2]}\n"
+            f"Received: {X_input.shape[2]}"
+        )
+
+    # ========================================================
+    # PREDICTION
+    # ========================================================
+
+    prediction = model.predict(
+        X_input,
+        verbose=0
+    )
+
+    failure_probability = float(
+        prediction[0][0]
+    )
+
+    failure_probability = float(
+        np.clip(
+            failure_probability,
+            0.0,
+            1.0
+        )
+    )
+
+    # ========================================================
+    # RESULT
+    # ========================================================
+
+    print("\n" + "=" * 80)
+    print("PREDICTION RESULT")
+    print("=" * 80)
+
+    print(
+        f"Failure Probability : "
+        f"{failure_probability:.6f}"
+    )
+
+    print(
+        f"Window Size         : "
+        f"{X_input.shape[1]}"
+    )
+
+    print(
+        f"Feature Count       : "
+        f"{X_input.shape[2]}"
+    )
+
+    print("=" * 80)
+
+    return failure_probability
+
+
+if __name__ == "__main__":
+    
+    # train_model(
+       
+    # )
+
+    prediction = load_and_predict(
+        excel_path="./data/test_lstm.xlsx",
+        model_dir="./failure_probability_model",
+        schema_path="./data/feature_schema.json",
+        sample_size=30
+    )
+
+    print(
+        "\nFinal Prediction:",
+        prediction
+    )
