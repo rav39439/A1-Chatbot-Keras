@@ -1204,3 +1204,320 @@ print(
 
 
 
+####################################for distributed trainning use this ################################
+
+# warmup_path=""
+# with strategy.scope():
+
+#     model = DecoderOnlyTransformer(
+#         num_layers=NUM_LAYERS,
+#         d_model=EMBED_DIM,
+#         num_heads=NUM_HEADS,
+#         dff=DFF,
+#         vocab_size=vocab_size,
+#         maximum_position_encoding=SEQ_LEN,
+#         rate=DROPOUT
+#     )
+
+#     # -----------------------------------------------------
+#     # Build model
+#     # -----------------------------------------------------
+
+#     dummy_input = tf.zeros(
+#         (
+#             1,
+#             SEQ_LEN - 1
+#         ),
+#         dtype=tf.int32
+#     )
+
+#     dummy_output = model(
+#         dummy_input,
+#         training=False
+#     )
+
+#     print("\nModel output shape:")
+#     print(dummy_output.shape)
+
+#     # -----------------------------------------------------
+#     # Loss
+#     # -----------------------------------------------------
+
+#     loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(
+#         from_logits=True
+#     )
+
+#     if os.path.exists(warmup_path) and os.path.getsize(warmup_path) > 0:
+
+#         try:
+#             with open(warmup_path, "r") as f:
+#                 config = json.load(f)
+    
+#             lr_schedule = WarmupCosineDecay(**config)
+    
+#             print("WarmupCosineDecay loaded successfully.")
+#             print(config)
+#         except (json.JSONDecodeError, TypeError, KeyError) as e:
+
+            
+#             print("continuing with new WarmupCosineDecay file.")
+#     #lr_schedule
+#     optimizer = tf.keras.optimizers.AdamW(
+#         learning_rate=lr_schedule,
+#         weight_decay=WEIGHT_DECAY
+#     )
+
+#     # -----------------------------------------------------
+#     # Compile
+#     # -----------------------------------------------------
+
+#     # model.compile(
+#     #     optimizer=optimizer,
+#     #     loss=loss_fn,
+#     #     metrics=[
+#     #         tf.keras.metrics.SparseCategoricalAccuracy(
+#     #             name="accuracy"
+#     #         )
+#     #     ]
+#     # )
+
+
+
+#     # -----------------------------------------------------
+#     # Optimizer
+#     # -----------------------------------------------------
+
+# # =========================================================
+# # 12. MODEL SUMMARY
+# # =========================================================
+
+# class LearningRatePrinter(tf.keras.callbacks.Callback):
+
+#     def on_epoch_end(self, epoch, logs=None):
+#         lr = self.model.optimizer.learning_rate
+
+#         if callable(lr):
+#             lr = lr(self.model.optimizer.iterations)
+
+#         lr = float(tf.keras.backend.get_value(lr))
+
+#         print(f"Epoch {epoch + 1} - Learning Rate: {lr:.10f}")
+
+# # =========================================================
+# # 13. LOAD PREVIOUS WEIGHTS
+# # =========================================================
+
+#     LOAD_PREVIOUS_WEIGHTS = True
+    
+#     # PREVIOUS_WEIGHTS = (
+#     #     "/kaggle/input/datasets/ravckumar/model212/transformer_model.keras"
+#     # )
+#     PREVIOUS_WEIGHTS = (
+#         "/kaggle/working/last_epoch_transformer.weights.h5"
+#     )
+    
+#     optimizer_path=""
+#     if LOAD_PREVIOUS_WEIGHTS:
+    
+#         print(
+#             "\nLoading previous model weights..."
+#         )
+#         model.load_weights(
+#             PREVIOUS_WEIGHTS
+#         )
+#         model.compile(
+#         optimizer=optimizer,
+#         loss=loss_fn,
+#         metrics=[
+#             tf.keras.metrics.SparseCategoricalAccuracy(
+#                 name="accuracy"
+#             )
+#             ]
+#         )
+        
+#         if os.path.exists(optimizer_path):
+#             optimizer.build(model.trainable_variables)
+    
+    
+#             # optimizer_path = "/kaggle/working/optimizer2_state.pkl"
+#             with open(optimizer_path, "rb") as f:
+#                 optimizer_weights = pickle.load(f)
+#             optimizer.set_weights(optimizer_weights)
+#             print("optimizer weights initialized")
+#         else:
+#             print("no optimizer found and fresh optimizer used")
+    
+#         print(
+#             "Previous weights loaded."
+#         )
+    
+#     else:
+    
+#         model.compile(
+#         optimizer=optimizer,
+#         loss=loss_fn,
+#         metrics=[
+#             tf.keras.metrics.SparseCategoricalAccuracy(
+#                 name="accuracy"
+#             )
+#             ]
+#         )
+    
+        
+        
+#         print(
+#             "\nTraining from fresh model initialization."
+#         )
+
+
+# print("\nModel initialized.")
+
+
+# model.summary()
+
+#####################################################################################################
+
+###################################inference######################################33
+
+
+# =========================================================
+# 26. TEXT GENERATION
+# =========================================================
+
+# def generate_text_greedy(
+#     model,
+#     tokenizer,
+#     prompt,
+#     max_gen=40
+# ):
+
+#     # -----------------------------------------------------
+#     # Tokenize prompt
+#     # -----------------------------------------------------
+
+#     token_list = tokenizer.encode(
+#         prompt,
+#         add_special_tokens=False
+#     )
+
+#     if len(token_list) == 0:
+
+#         raise ValueError(
+#             "Prompt produced zero tokens."
+#         )
+
+#     # -----------------------------------------------------
+#     # Keep latest context
+#     # -----------------------------------------------------
+
+#     if len(token_list) > SEQ_LEN - 1:
+
+#         token_list = token_list[
+#             -(SEQ_LEN - 1):
+#         ]
+
+#     # -----------------------------------------------------
+#     # Initial input
+#     # -----------------------------------------------------
+
+#     input_seq = tf.constant(
+#         [token_list],
+#         dtype=tf.int32
+#     )
+
+#     generated_ids = []
+
+#     # -----------------------------------------------------
+#     # Generate
+#     # -----------------------------------------------------
+
+#     for _ in range(max_gen):
+
+#         logits = model(
+#             input_seq,
+#             training=False
+#         )
+
+#         # -------------------------------------------------
+#         # Select logits for the final position
+#         # -------------------------------------------------
+
+#         last_logits = logits[:, -1, :]
+
+#         # -------------------------------------------------
+#         # Greedy decoding
+#         # -------------------------------------------------
+
+#         next_id = tf.argmax(
+#             last_logits,
+#             axis=-1,
+#             output_type=tf.int32
+#         )
+
+#         next_id_value = int(
+#             next_id.numpy()[0]
+#         )
+
+#         generated_ids.append(
+#             next_id_value
+#         )
+#         # -------------------------------------------------
+#         # Append generated token
+#         # -------------------------------------------------
+
+#         input_seq = tf.concat(
+#             [
+#                 input_seq,
+#                 tf.reshape(
+#                     next_id,
+#                     (1, 1)
+#                 )
+#             ],
+#             axis=1
+#         )
+
+#         # -------------------------------------------------
+#         # Keep context <= SEQ_LEN
+#         # -------------------------------------------------
+
+#         if input_seq.shape[1] > SEQ_LEN:
+
+#             input_seq = input_seq[
+#                 :, -SEQ_LEN:
+#             ]
+#     # -----------------------------------------------------
+#     # Decode generated tokens
+#     # -----------------------------------------------------
+
+#     generated_text = tokenizer.decode(
+#         generated_ids,
+#         skip_special_tokens=True
+#     )
+#     return (
+#         prompt
+#         + " "
+#         + generated_text
+#     )
+
+
+# # =========================================================
+# # 27. TEST GENERATION
+# # =========================================================
+
+# result = generate_text_greedy(
+#     model,
+#     tokenizer,
+#     "Mahatma Gandhi was ",
+#     max_gen=20
+# )
+
+
+
+
+# print("\n==============================")
+# print("GENERATED TEXT")
+# print("==============================")
+# print(result)
+
+
+
