@@ -1,0 +1,1206 @@
+## import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+from collections import defaultdict
+import string
+import tensorflow as tf
+import re
+import os
+
+import time
+from tensorflow import keras
+from tensorflow.keras.layers import Dense, Input
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.models import Model
+from tensorflow.keras.callbacks import ModelCheckpoint
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.model_selection import train_test_split
+import tensorflow as tf
+import numpy as np
+import re
+# -------------------------
+# Parameters
+# -------------------------
+
+TRAIN_RATIO = 0.97
+SEQ_LEN = 256
+STRIDE = 256
+# PER_GPU_BATCH_SIZE = 38
+# GLOBAL_BATCH_SIZE  = 76
+BATCH_SIZE = 24
+BUFFER_SIZE = 10000
+EMBED_DIM = 256
+NUM_HEADS = 8
+NUM_LAYERS = 13
+DFF = 1024
+DROPOUT = 0.1
+# T
+EPOCHS =20
+INITIAL_LR = 3e-5
+MIN_LR = 1e-6
+WARMUP_EPOCHS = 1
+WEIGHT_DECAY = 0.01
+# ---------------------------------------------------------
+# Reproducibility
+# ---------------------------------------------------------
+
+SEED = 42
+
+# -------------------------
+# 1. Read text file
+# -------------------------
+
+
+
+# --------------------------transformer---------------------------------------
+
+def get_angles(pos, i, d_model):
+    angle_rates = 1 / np.power(10000, (2 * (i//2)) / np.float32(d_model))
+    return pos * angle_rates
+
+def positional_encoding(position, d_model):
+    angle_rads = get_angles(np.arange(position)[:, np.newaxis],
+                            np.arange(d_model)[np.newaxis, :],
+                            d_model)
+    angle_rads[:, 0::2] = np.sin(angle_rads[:, 0::2])
+    angle_rads[:, 1::2] = np.cos(angle_rads[:, 1::2])
+    pos_encoding = angle_rads[np.newaxis, ...].astype(np.float32)
+    return tf.constant(pos_encoding)
+
+def create_look_ahead_mask(size):
+    mask = 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
+    return mask  # (seq_len, seq_len)
+
+# -------------------------
+# MHA and FFN (same as you had)
+# -------------------------
+def scaled_dot_product_attention(q, k, v, mask):
+    matmul_qk = tf.matmul(q, k, transpose_b=True)
+    dk = tf.cast(tf.shape(k)[-1], tf.float32)
+    scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
+    if mask is not None:
+        # mask shape should broadcast to (..., seq_len_q, seq_len_k)
+        scaled_attention_logits += (mask * -1e9)
+    attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)
+    output = tf.matmul(attention_weights, v)
+    return output, attention_weights
+
+    
+class MultiHeadAttention(tf.keras.layers.Layer):
+    def __init__(self, d_model, num_heads):
+        super().__init__()
+        assert d_model % num_heads == 0
+        self.num_heads = num_heads
+        self.d_model = d_model
+        self.depth = d_model // num_heads
+        self.wq = tf.keras.layers.Dense(d_model)
+        self.wk = tf.keras.layers.Dense(d_model)
+        self.wv = tf.keras.layers.Dense(d_model)
+        self.dense = tf.keras.layers.Dense(d_model)
+
+    def split_heads(self, x, batch_size):
+        x = tf.reshape(x, (batch_size, -1, self.num_heads, self.depth))
+        return tf.transpose(x, perm=[0, 2, 1, 3])
+
+    def call(self, v, k, q, mask):
+        batch_size = tf.shape(q)[0]
+        q = self.wq(q); k = self.wk(k); v = self.wv(v)
+        q = self.split_heads(q, batch_size)
+        k = self.split_heads(k, batch_size)
+        v = self.split_heads(v, batch_size)
+        scaled_attention, attn_weights = scaled_dot_product_attention(q, k, v, mask)
+        scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])
+        concat = tf.reshape(scaled_attention, (batch_size, -1, self.d_model))
+        out = self.dense(concat)
+        return out, attn_weights
+
+def point_wise_feed_forward_network(d_model, dff):
+    return tf.keras.Sequential([
+        tf.keras.layers.Dense(dff, activation=tf.nn.gelu),
+        tf.keras.layers.Dense(d_model)
+    ])
+
+class DecoderOnlyLayer(tf.keras.layers.Layer):
+    """Single decoder-only layer: masked self-attention + feedforward"""
+    def __init__(self, d_model, num_heads, dff, rate=0.05):
+        super(DecoderOnlyLayer, self).__init__()
+        self.mha = MultiHeadAttention(d_model, num_heads)
+        self.ffn = point_wise_feed_forward_network(d_model, dff)
+
+        # Pre-LayerNorm
+        self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+
+        # Dropout
+        self.dropout1 = tf.keras.layers.Dropout(rate)
+        self.dropout2 = tf.keras.layers.Dropout(rate)
+
+    def call(self, x, training, look_ahead_mask=None):
+        # Pre-norm before masked self-attention
+        x_norm = self.layernorm1(x)
+        attn_output, _ = self.mha(x_norm, x_norm, x_norm, look_ahead_mask)
+        attn_output = self.dropout1(attn_output, training=training)
+        out1 = x + attn_output
+
+        # Pre-norm before FFN
+        out1_norm = self.layernorm2(out1)
+        ffn_output = self.ffn(out1_norm)
+        ffn_output = self.dropout2(ffn_output, training=training)
+        out2 = out1 + ffn_output
+
+        return out2
+
+
+class DecoderOnlyTransformer(tf.keras.Model):
+
+    def __init__(
+        self,
+        num_layers,
+        d_model,
+        num_heads,
+        dff,
+        vocab_size,
+        maximum_position_encoding,
+        rate=0.05,
+        **kwargs
+    ):
+        super(DecoderOnlyTransformer, self).__init__(**kwargs)
+
+        self.num_layers = num_layers
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.dff = dff
+        self.vocab_size = vocab_size
+        self.maximum_position_encoding = maximum_position_encoding
+        self.rate = rate
+
+        self.embedding = tf.keras.layers.Embedding(
+            vocab_size,
+            d_model
+        )
+
+        self.pos_encoding = positional_encoding(
+            maximum_position_encoding,
+            d_model
+        )
+
+        self.dec_layers = [
+            DecoderOnlyLayer(
+                d_model,
+                num_heads,
+                dff,
+                rate
+            )
+            for _ in range(num_layers)
+        ]
+
+        self.dropout = tf.keras.layers.Dropout(rate)
+
+        self.final_layer = tf.keras.layers.Dense(vocab_size)
+
+    def call(self, x, training=False, look_ahead_mask=None):
+
+        seq_len = tf.shape(x)[1]
+
+        if look_ahead_mask is None:
+            look_ahead_mask = create_look_ahead_mask(seq_len)
+
+        x = self.embedding(x)
+
+        x *= tf.math.sqrt(
+            tf.cast(self.d_model, tf.float32)
+        )
+
+        x += self.pos_encoding[:, :seq_len, :]
+
+        x = self.dropout(
+            x,
+            training=training
+        )
+
+        for i in range(self.num_layers):
+
+            x = self.dec_layers[i](
+                x,
+                training=training,
+                look_ahead_mask=look_ahead_mask
+            )
+
+        logits = self.final_layer(x)
+
+        return logits
+
+    def get_config(self):
+
+        config = super().get_config()
+
+        config.update({
+            "num_layers": self.num_layers,
+            "d_model": self.d_model,
+            "num_heads": self.num_heads,
+            "dff": self.dff,
+            "vocab_size": self.vocab_size,
+            "maximum_position_encoding": self.maximum_position_encoding,
+            "rate": self.rate,
+        })
+
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
+#-----------------------------------------------------------------------------------
+
+
+
+
+# =========================================================
+# 1. CHUNK-BY-CHUNK PREPROCESSING CONFIGURATION
+# =========================================================
+import os
+import pickle
+import math
+import numpy as np
+import tensorflow as tf
+from transformers import BertTokenizerFast
+GLOBAL_BATCH_SIZE=10
+
+CHAR_CHUNK_SIZE = 1_000_000
+DATA_FILE="/kaggle/input/datasets/ravckumar/context-changed/context_aggregated1.txt"
+WINDOWS_PER_SHARD = 10_000
+
+SHARD_DIR = "/kaggle/working/tokenized_shards"
+
+os.makedirs(SHARD_DIR, exist_ok=True)
+
+train_files = tf.io.gfile.glob(
+    os.path.join(SHARD_DIR, "train-*.tfrecord")
+)
+
+val_files = tf.io.gfile.glob(
+    os.path.join(SHARD_DIR, "val-*.tfrecord")
+)
+
+SHARDS_EXIST = bool(train_files and val_files)
+
+
+
+
+# # Remove old TFRecord shards from this dedicated directory.
+# for filename in os.listdir(SHARD_DIR):
+#     if filename.endswith(".tfrecord"):
+#         os.remove(os.path.join(SHARD_DIR, filename))
+
+
+SEQ_LEN = 256
+STRIDE = 256
+
+TRAIN_RATIO = 0.97
+
+PER_GPU_BATCH_SIZE = 16
+NUM_GPUS = len(tf.config.list_physical_devices("GPU"))
+NUM_GPUS = max(1, NUM_GPUS)
+
+GLOBAL_BATCH_SIZE = PER_GPU_BATCH_SIZE * NUM_GPUS
+
+BUFFER_SIZE = 10_000
+SEED = 42
+
+EPOCHS = 10
+WARMUP_EPOCHS = 1
+
+INITIAL_LR = 1e-4
+MIN_LR = 1e-6
+WEIGHT_DECAY = 0.01
+
+# Transformer architecture
+D_MODEL = 256
+NUM_HEADS = 8
+NUM_LAYERS = 4
+DFF = 1024
+DROPOUT = 0.1
+
+tf.random.set_seed(SEED)
+
+
+# =========================================================
+# LEARNING-RATE SCHEDULE
+# =========================================================
+
+@tf.keras.utils.register_keras_serializable()
+class WarmupCosineDecay(tf.keras.optimizers.schedules.LearningRateSchedule):
+
+    def __init__(
+        self,
+        initial_lr,
+        min_lr,
+        warmup_steps,
+        total_steps
+    ):
+        super().__init__()
+
+        self.initial_lr = initial_lr
+        self.min_lr = min_lr
+        self.warmup_steps = warmup_steps
+        self.total_steps = total_steps
+
+    def __call__(self, step):
+
+        step = tf.cast(step, tf.float32)
+        warmup_steps = tf.cast(self.warmup_steps, tf.float32)
+        total_steps = tf.cast(self.total_steps, tf.float32)
+
+        warmup_lr = (
+            self.initial_lr
+            * (step + 1.0)
+            / tf.maximum(warmup_steps, 1.0)
+        )
+
+        progress = tf.clip_by_value(
+            (step - warmup_steps)
+            / tf.maximum(total_steps - warmup_steps, 1.0),
+            0.0,
+            1.0
+        )
+
+        cosine_lr = self.min_lr + (
+            self.initial_lr - self.min_lr
+        ) * 0.5 * (
+            1.0 + tf.cos(math.pi * progress)
+        )
+
+        return tf.where(
+            step < warmup_steps,
+            warmup_lr,
+            cosine_lr
+        )
+
+    def get_config(self):
+        return {
+            "initial_lr": self.initial_lr,
+            "min_lr": self.min_lr,
+            "warmup_steps": self.warmup_steps,
+            "total_steps": self.total_steps
+        }
+
+
+# =========================================================
+# LEARNING-RATE PRINTER CALLBACK
+# =========================================================
+
+class LearningRatePrinter(tf.keras.callbacks.Callback):
+
+    def on_epoch_end(self, epoch, logs=None):
+
+        optimizer = self.model.optimizer
+        learning_rate = optimizer.learning_rate
+
+        if callable(learning_rate):
+            learning_rate = learning_rate(
+                optimizer.iterations
+            )
+
+        learning_rate = float(
+            tf.keras.backend.get_value(learning_rate)
+        )
+
+        print(
+            f"Epoch {epoch + 1}: "
+            f"Learning rate = {learning_rate:.8f}"
+        )
+
+
+# =========================================================
+# MODEL CHECKPOINT CALLBACK
+# =========================================================
+
+checkpoint_cb = tf.keras.callbacks.ModelCheckpoint(
+    filepath="/kaggle/working/best_transformer.weights.h5",
+    monitor="val_loss",
+    save_best_only=True,
+    save_weights_only=True,
+    verbose=1
+)
+
+
+# =========================================================
+# 2. LOAD TOKENIZER
+# =========================================================
+
+tokenizer = BertTokenizerFast.from_pretrained(
+    "bert-base-uncased"
+)
+
+tokenizer.model_max_length = int(1e9)
+
+vocab_size = tokenizer.vocab_size
+
+print("Vocabulary size:", vocab_size)
+
+
+# =========================================================
+# 3. READ TEXT IN CHUNKS
+# =========================================================
+
+def iter_text_chunks(
+    file_path,
+    chunk_size=CHAR_CHUNK_SIZE
+):
+    """
+    Read text incrementally while preserving word boundaries
+    between consecutive chunks.
+    """
+
+    with open(file_path, "r", encoding="utf-8") as f:
+
+        pending = ""
+
+        while True:
+
+            raw = f.read(chunk_size)
+
+            if not raw:
+                break
+
+            pending += raw
+
+            # Keep the final incomplete word for the next read.
+            cut = max(
+                pending.rfind(" "),
+                pending.rfind("\n"),
+                pending.rfind("\t"),
+                pending.rfind("\r")
+            )
+
+            if cut < 0:
+                continue
+
+            chunk = pending[:cut + 1]
+            pending = pending[cut + 1:]
+
+            if chunk:
+                yield chunk
+
+        if pending:
+            yield pending
+
+
+def tokenize_chunk(text_chunk):
+
+    result = tokenizer(
+        text_chunk,
+        add_special_tokens=False,
+        return_attention_mask=False,
+        return_token_type_ids=False,
+        truncation=False
+    )
+
+    return result["input_ids"]
+
+
+class ShardWriter:
+
+    def __init__(
+        self,
+        prefix,
+        shard_dir=SHARD_DIR,
+        windows_per_shard=WINDOWS_PER_SHARD
+    ):
+
+        self.prefix = prefix
+        self.shard_dir = shard_dir
+        self.windows_per_shard = windows_per_shard
+
+        self.shard_index = -1
+        self.windows_in_shard = 0
+        self.total_windows = 0
+        self.writer = None
+
+    def _open_next_shard(self):
+
+        if self.writer is not None:
+            self.writer.close()
+
+        self.shard_index += 1
+        self.windows_in_shard = 0
+
+        path = os.path.join(
+            self.shard_dir,
+            f"{self.prefix}-{self.shard_index:05d}.tfrecord"
+        )
+
+        self.writer = tf.io.TFRecordWriter(path)
+
+        print("Writing shard:", path)
+
+    def write(self, window):
+
+        if (
+            self.writer is None
+            or self.windows_in_shard >= self.windows_per_shard
+        ):
+            self._open_next_shard()
+
+        feature = {
+            "token_ids": tf.train.Feature(
+                int64_list=tf.train.Int64List(
+                    value=[int(token) for token in window]
+                )
+            )
+        }
+
+        example = tf.train.Example(
+            features=tf.train.Features(
+                feature=feature
+            )
+        )
+
+        self.writer.write(
+            example.SerializeToString()
+        )
+
+        self.windows_in_shard += 1
+        self.total_windows += 1
+
+    def close(self):
+
+        if self.writer is not None:
+            self.writer.close()
+            self.writer = None
+
+def parse_tfrecord(record):
+
+    feature_description = {
+        "token_ids": tf.io.FixedLenFeature(
+            [SEQ_LEN],
+            tf.int64
+        )
+    }
+
+    parsed = tf.io.parse_single_example(
+        record,
+        feature_description
+    )
+
+    token_ids = tf.cast(
+        parsed["token_ids"],
+        tf.int32
+    )
+
+    inputs = token_ids[:-1]
+    targets = token_ids[1:]
+
+    return inputs, targets
+# =========================================================
+# 4. FIRST PASS: COUNT TOKENS
+# =========================================================
+
+
+
+# =========================================================
+# 6. TFRECORD SHARD WRITER
+# =========================================================
+
+
+
+# =========================================================
+# 7. SECOND PASS: CREATE WINDOWS IN STREAMING MODE
+# =========================================================
+if not SHARDS_EXIST:
+
+    print("\nCounting tokens chunk by chunk...")
+    
+    total_tokens = 0
+    
+    for text_chunk in iter_text_chunks(DATA_FILE):
+    
+        chunk_ids = tokenize_chunk(text_chunk)
+    
+        total_tokens += len(chunk_ids)
+    
+        del chunk_ids
+    
+    print("Total tokens:", total_tokens)
+    
+    if total_tokens < 2 * SEQ_LEN:
+        raise ValueError(
+            "The corpus is too small for the selected sequence length "
+            "and train/validation split."
+        )
+    
+    
+    # =========================================================
+    # 5. TRAIN / VALIDATION SPLIT
+    # =========================================================
+    
+    split_index = int(
+        total_tokens * TRAIN_RATIO
+    )
+    
+    train_token_count = split_index
+    val_token_count = total_tokens - split_index
+    
+    print("\nToken split:")
+    print("Training tokens:", train_token_count)
+    print("Validation tokens:", val_token_count)
+    
+    # These match the original create_windows() behavior:
+    # each split starts its own sequence-window stride.
+    
+    train_window_count = max(
+        0,
+        (train_token_count - SEQ_LEN) // STRIDE + 1
+    )
+    
+    val_window_count = max(
+        0,
+        (val_token_count - SEQ_LEN) // STRIDE + 1
+    )
+    
+    if train_window_count == 0 or val_window_count == 0:
+        raise ValueError(
+            "Training or validation contains no complete windows. "
+            "Check SEQ_LEN, STRIDE, and TRAIN_RATIO."
+        )
+    
+    print("Training windows expected:", train_window_count)
+    print("Validation windows expected:", val_window_count)
+    
+
+
+    train_writer = ShardWriter("train")
+    val_writer = ShardWriter("val")
+    
+    token_buffer = []
+    
+    # Global token index corresponding to token_buffer[0].
+    buffer_start = 0
+    
+    next_train_start = 0
+    next_val_start = split_index
+    
+    try:
+    
+        for text_chunk in iter_text_chunks(DATA_FILE):
+    
+            chunk_ids = tokenize_chunk(text_chunk)
+    
+            token_buffer.extend(chunk_ids)
+    
+            del chunk_ids
+    
+            buffer_end = (
+                buffer_start + len(token_buffer)
+            )
+    
+            # -------------------------------------------------
+            # Write training windows
+            # -------------------------------------------------
+    
+            while (
+                next_train_start + SEQ_LEN <= split_index
+                and next_train_start + SEQ_LEN <= buffer_end
+            ):
+    
+                local_start = (
+                    next_train_start - buffer_start
+                )
+    
+                window = token_buffer[
+                    local_start:local_start + SEQ_LEN
+                ]
+    
+                train_writer.write(window)
+    
+                next_train_start += STRIDE
+    
+            # -------------------------------------------------
+            # Write validation windows
+            # -------------------------------------------------
+    
+            while (
+                next_val_start + SEQ_LEN <= total_tokens
+                and next_val_start + SEQ_LEN <= buffer_end
+            ):
+    
+                local_start = (
+                    next_val_start - buffer_start
+                )
+    
+                window = token_buffer[
+                    local_start:local_start + SEQ_LEN
+                ]
+    
+                val_writer.write(window)
+    
+                next_val_start += STRIDE
+    
+            # -------------------------------------------------
+            # Discard tokens no longer needed
+            # -------------------------------------------------
+    
+            earliest_needed = min(
+                next_train_start
+                if next_train_start + SEQ_LEN <= split_index
+                else split_index,
+                next_val_start
+            )
+    
+            discard_count = max(
+                0,
+                min(
+                    earliest_needed - buffer_start,
+                    len(token_buffer)
+                )
+            )
+    
+            if discard_count > 0:
+    
+                del token_buffer[:discard_count]
+    
+                buffer_start += discard_count
+    
+    finally:
+    
+        train_writer.close()
+        val_writer.close()
+    
+    
+    print("\nStreaming preprocessing completed.")
+    
+    print(
+        "Training windows written:",
+        train_writer.total_windows
+    )
+    
+    print(
+        "Validation windows written:",
+        val_writer.total_windows
+    )
+    
+    assert train_writer.total_windows == train_window_count, (
+        "Training window count mismatch."
+    )
+    
+    assert val_writer.total_windows == val_window_count, (
+        "Validation window count mismatch."
+    )
+
+else:
+    print("shard exist , Using the existing shards")
+
+# =========================================================
+# 8. PARSE TFRECORD WINDOWS
+# =========================================================
+
+
+
+# =========================================================
+# 9. LOAD TFRECORD FILES
+# =========================================================
+
+train_files = sorted(
+    tf.io.gfile.glob(
+        os.path.join(SHARD_DIR, "train-*.tfrecord")
+    )
+)
+
+val_files = sorted(
+    tf.io.gfile.glob(
+        os.path.join(SHARD_DIR, "val-*.tfrecord")
+    )
+)
+
+if not train_files or not val_files:
+    raise ValueError(
+        "Training or validation TFRecord files were not created."
+    )
+
+print("Training shards:", len(train_files))
+print("Validation shards:", len(val_files))
+
+
+# =========================================================
+# 10. TRAIN DATASET
+# =========================================================
+
+train_dataset = tf.data.TFRecordDataset(
+    train_files,
+    num_parallel_reads=tf.data.AUTOTUNE
+)
+
+train_dataset = (
+    train_dataset
+    .map(
+        parse_tfrecord,
+        num_parallel_calls=tf.data.AUTOTUNE
+    )
+    .shuffle(
+        BUFFER_SIZE,
+        seed=SEED,
+        reshuffle_each_iteration=True
+    )
+    .batch(
+        GLOBAL_BATCH_SIZE,
+        drop_remainder=True
+    )
+    .prefetch(
+        tf.data.AUTOTUNE
+    )
+)
+
+
+# =========================================================
+# 11. VALIDATION DATASET
+# =========================================================
+
+val_dataset = tf.data.TFRecordDataset(
+    val_files,
+    num_parallel_reads=tf.data.AUTOTUNE
+)
+
+val_dataset = (
+    val_dataset
+    .map(
+        parse_tfrecord,
+        num_parallel_calls=tf.data.AUTOTUNE
+    )
+    .batch(
+        GLOBAL_BATCH_SIZE,
+        drop_remainder=False
+    )
+    .prefetch(
+        tf.data.AUTOTUNE
+    )
+)
+
+
+# =========================================================
+# 12. DATASET SIZE AND LEARNING-RATE STEPS
+# =========================================================
+
+steps_per_epoch = (
+    train_window_count // GLOBAL_BATCH_SIZE
+)
+
+validation_steps = math.ceil(
+    val_window_count / GLOBAL_BATCH_SIZE
+)
+
+if steps_per_epoch == 0:
+    raise ValueError(
+        "Not enough training windows for one full batch."
+    )
+
+total_steps = (
+    steps_per_epoch * EPOCHS
+)
+
+warmup_steps = (
+    steps_per_epoch * WARMUP_EPOCHS
+)
+
+print("\n======================================")
+print("TRAINING CONFIGURATION")
+print("======================================")
+
+print("Number of GPUs:", NUM_GPUS)
+print("Per-GPU batch size:", PER_GPU_BATCH_SIZE)
+print("Global batch size:", GLOBAL_BATCH_SIZE)
+print("Training windows:", train_window_count)
+print("Validation windows:", val_window_count)
+print("Steps per epoch:", steps_per_epoch)
+print("Validation steps:", validation_steps)
+print("Total steps:", total_steps)
+print("Warmup steps:", warmup_steps)
+
+
+lr_schedule = WarmupCosineDecay(
+    initial_lr=INITIAL_LR,
+    min_lr=MIN_LR,
+    warmup_steps=warmup_steps,
+    total_steps=total_steps
+)
+
+
+model = DecoderOnlyTransformer(
+    num_layers=NUM_LAYERS,
+    d_model=EMBED_DIM,
+    num_heads=NUM_HEADS,
+    dff=DFF,
+    vocab_size=vocab_size,
+    maximum_position_encoding=SEQ_LEN,
+    rate=DROPOUT
+)
+
+
+# =========================================================
+# 12. BUILD MODEL
+# =========================================================
+
+dummy_input = tf.zeros(
+    (
+        1,
+        SEQ_LEN - 1
+    ),
+    dtype=tf.int32
+)
+
+dummy_output = model(
+    dummy_input,
+    training=False
+)
+
+print("\nModel output shape:")
+print(dummy_output.shape)
+
+
+loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(
+    from_logits=True
+)
+
+
+optimizer = tf.keras.optimizers.AdamW(
+    learning_rate=lr_schedule,
+    weight_decay=WEIGHT_DECAY
+)
+
+# =========================================================
+# 16. COMPILE
+# =========================================================
+
+
+
+
+# =========================================================
+# 17. MODEL SUMMARY
+# =========================================================
+model.summary()
+LOAD_PREVIOUS_WEIGHTS = False
+PREVIOUS_WEIGHTS = (
+    "/kaggle/working/final3_transformer_last_epoch.weights.h5"
+)
+
+
+# warmup_path=""
+optimizer_path="/kaggle/working/optimizer2_state.pkl"
+if LOAD_PREVIOUS_WEIGHTS:
+
+    print(
+        "\nLoading previous model weights..."
+    )
+
+    model.load_weights(
+        PREVIOUS_WEIGHTS
+    )
+    model.compile(
+    optimizer=optimizer,
+    loss=loss_fn,
+    metrics=[
+        tf.keras.metrics.SparseCategoricalAccuracy(
+            name="accuracy"
+        )
+        ]
+    )
+
+    
+    if os.path.exists(optimizer_path):
+        optimizer.build(model.trainable_variables)
+        with open(optimizer_path, "rb") as f:
+            optimizer_weights = pickle.load(f)
+        optimizer.set_weights(optimizer_weights)
+        print("optimizer weights initialized")
+    else:
+        print("no optimizer found and fresh optimizer used")
+
+
+    print(
+        "Previous weights loaded."
+    )
+
+else:
+
+    model.compile(
+        optimizer=optimizer,
+        loss=loss_fn,
+        metrics=[
+            tf.keras.metrics.SparseCategoricalAccuracy(
+                name="accuracy"
+            )
+        ]
+    )
+
+    print(
+        "\nTraining from fresh model initialization."
+    )
+
+
+print("\nModel initialized.")
+
+checkpoint_path = (
+    "/kaggle/working/"
+    "last_epoch_transformer.weights.h5"
+)
+
+checkpoint_cb = tf.keras.callbacks.ModelCheckpoint(
+    checkpoint_path,
+    save_weights_only=True,
+    monitor="val_loss",
+    mode="min",
+    save_best_only=False,
+    verbose=1
+)
+
+
+early_stopping_cb = tf.keras.callbacks.EarlyStopping(
+    monitor="val_loss",
+    mode="min",
+    patience=150,
+    restore_best_weights=False,
+    verbose=1
+)
+
+
+print("\n==============================")
+print("STARTING TRAINING")
+print("==============================")
+
+# history = model.fit(
+#     train_dataset,
+#     validation_data=val_dataset,
+#     epochs=EPOCHS,
+#     callbacks=[
+#         checkpoint_cb,
+#         # early_stopping_cb
+#     ]
+# )
+
+
+history = model.fit(
+    train_dataset,
+    validation_data=val_dataset,
+    epochs=EPOCHS,
+    steps_per_epoch=steps_per_epoch,
+    validation_steps=validation_steps,
+    callbacks=[
+        checkpoint_cb,
+        # early_stopping_cb
+    ]
+)
+
+
+
+print("\n==============================")
+print("FINAL LAST-EPOCH MODEL")
+print("==============================")
+
+final_loss, final_accuracy = model.evaluate(
+    val_dataset,
+    verbose=1
+)
+
+print(f"Final Validation Loss     : {final_loss:.4f}")
+print(f"Final Validation Accuracy : {final_accuracy:.4f}")
+
+
+final_model_path = (
+    "/kaggle/working/"
+    "final3_transformer_last_epoch.weights.h5"
+)
+
+# final_model_path = (
+#     "/kaggle/working/"
+#     "final3_transformer_last_epoch.keras"
+# )
+
+model.save_weights(final_model_path)
+
+# model.save(
+#     final_model_path
+# )
+
+
+print(
+    "\nLast epoch model weights saved to:",
+    final_model_path
+)
+
+
+TOKENIZER_PATH = "/kaggle/working/tokenizer"
+
+tokenizer.save_pretrained(TOKENIZER_PATH)
+
+print("Tokenizer saved to:", TOKENIZER_PATH)
+
+with open("warmup_cosine_decay.json", "w") as f:
+    json.dump(lr_schedule.get_config(), f, indent=4)
+
+
+print("Learning-rate schedule saved.")
+
+results = model.evaluate(
+    val_dataset,
+    return_dict=True
+)
+
+print("\n==============================")
+print("FINAL VALIDATION RESULTS")
+print("==============================")
+
+for name, value in results.items():
+
+    print(
+        f"{name}: {value:.6f}"
+    )
+
+
+# =========================================================
+# 23. VALIDATION PERPLEXITY
+# =========================================================
+
+val_loss = float(
+    results["loss"]
+)
+
+val_perplexity = float(
+    np.exp(val_loss)
+)
+
+print(
+    f"\nValidation perplexity: "
+    f"{val_perplexity:.4f}"
+)
+
+
+# =========================================================
+# 25. SAVE OPTIMIZER STATE
+# =========================================================
+
+optimizer_weights = [
+    variable.numpy()
+    for variable in optimizer.variables
+]
+
+optimizer_path = (
+    "/kaggle/working/"
+    "optimizer2_state.pkl"
+)
+
+with open(
+    optimizer_path,
+    "wb"
+) as f:
+
+    pickle.dump(
+        optimizer_weights,
+        f
+    )
+
+print(
+    "Optimizer state saved to:",
+    optimizer_path
+)
+
+
+
