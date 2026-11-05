@@ -1,0 +1,3353 @@
+import os
+import json
+import math
+import random
+import numpy as np
+import torch
+from torch.utils.data import Dataset, DataLoader
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM
+)
+
+# =========================================================
+# 0. CONFIGURATION
+# =========================================================
+DATA_FILE = (
+    "/kaggle/input/datasets/ravckumar/context-renewed2/context_aggregated.txt"
+)
+
+MODEL_NAME = "gpt2"
+
+OUTPUT_DIR = "/kaggle/working/gpt2_finetuned"
+CHECKPOINT_DIR = os.path.join(OUTPUT_DIR, "last_checkpoint")
+
+TOKENIZER_DIR = os.path.join(OUTPUT_DIR, "tokenizer")
+
+SEED = 42
+
+# Dataset
+TRAIN_RATIO = 0.97
+
+SEQ_LEN = 512
+STRIDE = 512
+
+# Training
+BATCH_SIZE = 4
+EPOCHS = 3
+
+MAX_STEPS_PER_EPOCH = 5000
+MAX_VALIDATION_STEPS = 1000
+
+INITIAL_LR = 2e-5
+MIN_LR = 2e-6
+
+WARMUP_STEPS = 200
+WEIGHT_DECAY = 0.01
+
+MAX_GRAD_NORM = 1.0
+
+NUM_WORKERS = 2
+# Resume training
+# RESUME_CHECKPOINT_DIR = "/kaggle/working/gpt2_finetuned"
+
+OUTPUT_DIR = "/kaggle/working/gpt2_finetuned"
+
+TOKENIZER_DIR = os.path.join(
+    OUTPUT_DIR,
+    "tokenizer"
+)
+
+CHECKPOINT_DIR = os.path.join(
+    OUTPUT_DIR,
+    "last_checkpoint"
+)
+# Example:
+# RESUME_CHECKPOINT_DIR = (
+#     "/kaggle/working/gpt2_finetuned/last_checkpoint"
+# )
+
+# =========================================================
+# 1. REPRODUCIBILITY
+# =========================================================
+
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+
+device = torch.device(
+    "cuda" if torch.cuda.is_available() else "cpu"
+)
+
+USE_AMP = device.type == "cuda"
+
+print("Device:", device)
+print("Mixed precision:", USE_AMP)
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+
+
+# =========================================================
+# 2. LOAD TEXT CORPUS
+# =========================================================
+
+print("\nLoading corpus...")
+
+with open(DATA_FILE, "r", encoding="utf-8") as f:
+    text = f.read()
+
+print("Characters:", len(text))
+
+
+# =========================================================
+# 3. LOAD PRETRAINED TOKENIZER
+# =========================================================
+
+print("\nLoading GPT-2 tokenizer...")
+
+TOKENIZER_SOURCE = (
+    RESUME_CHECKPOINT_DIR
+    if RESUME_CHECKPOINT_DIR is not None
+    else MODEL_NAME
+)
+
+# tokenizer = AutoTokenizer.from_pretrained(
+#     TOKENIZER_SOURCE,
+#     use_fast=True
+# )
+
+# =========================================================
+# 3. LOAD TOKENIZER
+# =========================================================
+
+print("\nLoading GPT-2 tokenizer...")
+
+if RESUME_CHECKPOINT_DIR is not None:
+
+    TOKENIZER_SOURCE = TOKENIZER_DIR
+
+else:
+
+    TOKENIZER_SOURCE = MODEL_NAME
+
+tokenizer = AutoTokenizer.from_pretrained(
+    TOKENIZER_SOURCE,
+    use_fast=True
+)
+
+# GPT-2 has no separate padding token.
+tokenizer.pad_token = tokenizer.eos_token
+
+print("Tokenizer loaded from:", TOKENIZER_SOURCE)
+print("Vocabulary size:", tokenizer.vocab_size)
+print("EOS token:", tokenizer.eos_token)
+print("PAD token:", tokenizer.pad_token)
+
+# GPT-2 does not have a separate padding token.
+# We do not actually pad our fixed-length windows,
+# but define EOS as padding for compatibility.
+
+
+
+
+
+# =========================================================
+# 4. TOKENIZE CORPUS
+# =========================================================
+
+print("\nTokenizing corpus...")
+
+encoding = tokenizer(
+    text,
+    add_special_tokens=False,
+    return_attention_mask=False,
+    truncation=False
+)
+
+token_ids = np.asarray(
+    encoding["input_ids"],
+    dtype=np.int32
+)
+
+del encoding
+del text
+
+print("Total tokens:", len(token_ids))
+
+assert len(token_ids) > SEQ_LEN, (
+    "Corpus is smaller than SEQ_LEN."
+)
+
+
+# =========================================================
+# 5. TRAIN / VALIDATION SPLIT
+# =========================================================
+
+print("\nSplitting tokens...")
+
+split_index = int(
+    len(token_ids) * TRAIN_RATIO
+)
+
+train_tokens = token_ids[:split_index]
+val_tokens = token_ids[split_index:]
+
+print("Training tokens:", len(train_tokens))
+print("Validation tokens:", len(val_tokens))
+
+
+# =========================================================
+# 6. SLIDING WINDOW DATASET
+# =========================================================
+
+class NextTokenDataset(Dataset):
+
+    def __init__(
+        self,
+        token_array,
+        seq_len,
+        stride
+    ):
+
+        self.tokens = token_array
+
+        self.seq_len = seq_len
+        self.stride = stride
+
+        self.starts = np.arange(
+            0,
+            len(token_array) - seq_len + 1,
+            stride,
+            dtype=np.int64
+        )
+
+    def __len__(self):
+
+        return len(self.starts)
+
+    def __getitem__(self, index):
+
+        start = self.starts[index]
+
+        end = start + self.seq_len
+
+        sequence = self.tokens[start:end]
+
+        return torch.tensor(
+            sequence.astype(np.int64),
+            dtype=torch.long
+        )
+
+
+train_dataset = NextTokenDataset(
+    train_tokens,
+    SEQ_LEN,
+    STRIDE
+)
+
+val_dataset = NextTokenDataset(
+    val_tokens,
+    SEQ_LEN,
+    STRIDE
+)
+
+print("\nDataset windows:")
+print("Training:", len(train_dataset))
+print("Validation:", len(val_dataset))
+
+
+# =========================================================
+# 7. DATALOADERS
+# =========================================================
+
+train_loader = DataLoader(
+    train_dataset,
+    batch_size=BATCH_SIZE,
+    shuffle=True,
+    drop_last=True,
+    num_workers=NUM_WORKERS,
+    pin_memory=USE_AMP
+)
+
+val_loader = DataLoader(
+    val_dataset,
+    batch_size=BATCH_SIZE,
+    shuffle=False,
+    drop_last=False,
+    num_workers=NUM_WORKERS,
+    pin_memory=USE_AMP
+)
+
+steps_per_epoch = min(
+    MAX_STEPS_PER_EPOCH,
+    len(train_loader)
+)
+
+validation_steps = min(
+    MAX_VALIDATION_STEPS,
+    len(val_loader)
+)
+
+if steps_per_epoch == 0 or validation_steps == 0:
+    raise ValueError("Insufficient training or validation batches.")
+
+TOTAL_STEPS = steps_per_epoch * EPOCHS
+
+print("\nTraining configuration:")
+print("Batch size:", BATCH_SIZE)
+print("Steps per epoch:", steps_per_epoch)
+print("Validation steps:", validation_steps)
+print("Epochs:", EPOCHS)
+print("Total optimizer steps:", TOTAL_STEPS)
+
+
+# =========================================================
+# 8. LOAD PRETRAINED CAUSAL TRANSFORMER
+# =========================================================
+
+print("\nLoading pretrained GPT-2...")
+
+# MODEL_SOURCE = (
+#     RESUME_CHECKPOINT_DIR
+#     if RESUME_CHECKPOINT_DIR is not None
+#     else MODEL_NAME
+# )
+
+if RESUME_CHECKPOINT_DIR is not None:
+
+    MODEL_SOURCE = CHECKPOINT_DIR
+
+    if not os.path.exists(
+        os.path.join(MODEL_SOURCE, "config.json")
+    ):
+        raise FileNotFoundError(
+            "config.json not found in checkpoint folder."
+        )
+
+    if not os.path.exists(
+        os.path.join(MODEL_SOURCE, "model.safetensors")
+    ):
+        raise FileNotFoundError(
+            "model.safetensors not found in checkpoint folder."
+        )
+
+else:
+
+    MODEL_SOURCE = MODEL_NAME
+
+
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_SOURCE
+)
+
+# Disable KV caching during training.
+
+model.config.use_cache = False
+
+model.config.pad_token_id = tokenizer.pad_token_id
+
+# Verify context window.
+
+MODEL_CONTEXT = model.config.n_positions
+
+if SEQ_LEN > MODEL_CONTEXT:
+    raise ValueError(
+        f"SEQ_LEN={SEQ_LEN} exceeds GPT-2 context "
+        f"window={MODEL_CONTEXT}."
+    )
+
+model.to(device)
+
+print("\nPretrained model configuration:")
+print("Model:", MODEL_NAME)
+print("Layers:", model.config.n_layer)
+print("Hidden size:", model.config.n_embd)
+print("Attention heads:", model.config.n_head)
+print("Vocabulary:", model.config.vocab_size)
+print("Context window:", MODEL_CONTEXT)
+
+total_parameters = sum(
+    p.numel() for p in model.parameters()
+)
+
+trainable_parameters = sum(
+    p.numel()
+    for p in model.parameters()
+    if p.requires_grad
+)
+
+print("Total parameters:", total_parameters)
+print("Trainable parameters:", trainable_parameters)
+
+
+# =========================================================
+# 9. OPTIMIZER
+# =========================================================
+
+optimizer = torch.optim.AdamW(
+    model.parameters(),
+    lr=INITIAL_LR,
+    weight_decay=WEIGHT_DECAY
+)
+
+
+# =========================================================
+# 10. WARMUP + COSINE LR SCHEDULE
+# =========================================================
+
+def lr_lambda(current_step):
+
+    if current_step < WARMUP_STEPS:
+
+        return max(
+            (current_step + 1) / max(WARMUP_STEPS, 1),
+            1e-8
+        )
+
+    progress = (
+        current_step - WARMUP_STEPS
+    ) / max(
+        TOTAL_STEPS - WARMUP_STEPS,
+        1
+    )
+
+    progress = min(max(progress, 0.0), 1.0)
+
+    cosine = 0.5 * (
+        1.0 + math.cos(math.pi * progress)
+    )
+
+    lr = (
+        MIN_LR
+        + (INITIAL_LR - MIN_LR) * cosine
+    )
+
+    return lr / INITIAL_LR
+
+
+scheduler = torch.optim.lr_scheduler.LambdaLR(
+    optimizer,
+    lr_lambda
+)
+
+scaler = torch.cuda.amp.GradScaler(
+    enabled=USE_AMP
+)
+
+
+# =========================================================
+# 11. RESUME PREVIOUS TRAINING
+# =========================================================
+
+# start_epoch = 0
+# global_step = 0
+
+# if RESUME_CHECKPOINT_DIR is not None:
+
+#     state_path = os.path.join(
+#         RESUME_CHECKPOINT_DIR,
+#         "training_state.pt"
+#     )
+
+#     if os.path.exists(state_path):
+
+#         print("\nLoading previous optimizer state...")
+
+#         state = torch.load(
+#             state_path,
+#             map_location=device,
+#             weights_only=False
+#         )
+
+#         optimizer.load_state_dict(
+#             state["optimizer"]
+#         )
+
+#         scheduler.load_state_dict(
+#             state["scheduler"]
+#         )
+
+#         if "scaler" in state:
+#             scaler.load_state_dict(
+#                 state["scaler"]
+#             )
+
+#         start_epoch = state["epoch"] + 1
+
+#         global_step = state["global_step"]
+
+#         print("Resuming from epoch:", start_epoch)
+#         print("Previous global step:", global_step)
+
+#     else:
+
+#         print(
+#             "No optimizer state found. "
+#             "Using fresh optimizer."
+#         )
+
+# =========================================================
+# 11. RESUME PREVIOUS TRAINING
+# =========================================================
+
+start_epoch = 0
+global_step = 0
+
+if RESUME_CHECKPOINT_DIR is not None:
+
+    state_path = os.path.join(
+         CHECKPOINT_DIR,
+        "training_state.pt"
+    )
+
+    if not os.path.exists(state_path):
+
+        raise FileNotFoundError(
+            f"Training state not found: {state_path}"
+        )
+
+    print("\nLoading previous training state...")
+
+    state = torch.load(
+        state_path,
+        map_location=device,
+        weights_only=False
+    )
+
+    optimizer.load_state_dict(
+        state["optimizer"]
+    )
+
+    scheduler.load_state_dict(
+        state["scheduler"]
+    )
+
+    if "scaler" in state:
+
+        scaler.load_state_dict(
+            state["scaler"]
+        )
+
+    start_epoch = state["epoch"] + 1
+
+    global_step = state["global_step"]
+
+    print("Previous epoch:", state["epoch"] + 1)
+    print("Resuming from epoch:", start_epoch)
+    print("Previous global step:", global_step)
+
+    del state
+
+    print("Optimizer, scheduler and scaler restored.")
+
+else:
+
+    print("\nStarting fresh GPT-2 fine-tuning.")
+
+    start_epoch = 0
+    global_step = 0
+
+    print("Loading pretrained GPT-2 weights.")
+    print("Optimizer initialized with fresh state.")
+# =========================================================
+# 12. TRAINING FUNCTION
+# =========================================================
+
+def train_one_epoch(
+    model,
+    loader,
+    optimizer,
+    scheduler,
+    scaler,
+    epoch
+):
+
+    model.train()
+
+    total_loss = 0.0
+
+    iterator = iter(loader)
+
+    for step in range(steps_per_epoch):
+
+        input_ids = next(iterator)
+
+        input_ids = input_ids.to(
+            device,
+            non_blocking=True
+        )
+
+        optimizer.zero_grad(set_to_none=True)
+
+        with torch.cuda.amp.autocast(
+            enabled=USE_AMP
+        ):
+
+            outputs = model(
+                input_ids=input_ids,
+
+                # The model internally shifts these
+                # labels for next-token prediction.
+
+                labels=input_ids
+            )
+
+            loss = outputs.loss
+
+        scaler.scale(loss).backward()
+
+        scaler.unscale_(optimizer)
+
+        torch.nn.utils.clip_grad_norm_(
+            model.parameters(),
+            MAX_GRAD_NORM
+        )
+
+        scaler.step(optimizer)
+
+        scaler.update()
+
+        scheduler.step()
+
+        total_loss += loss.item()
+
+        current_lr = scheduler.get_last_lr()[0]
+
+        if (step + 1) % 100 == 0:
+
+            print(
+                f"Epoch {epoch + 1} | "
+                f"Step {step + 1}/{steps_per_epoch} | "
+                f"Loss: {loss.item():.4f} | "
+                f"LR: {current_lr:.8f}"
+            )
+
+    average_loss = total_loss / steps_per_epoch
+
+    return average_loss
+
+
+# =========================================================
+# 13. VALIDATION FUNCTION
+# =========================================================
+
+@torch.no_grad()
+def evaluate_model(
+    model,
+    loader
+):
+
+    model.eval()
+
+    total_loss = 0.0
+
+    total_correct = 0
+    total_tokens = 0
+
+    for step, input_ids in enumerate(loader):
+
+        if step >= validation_steps:
+            break
+
+        input_ids = input_ids.to(
+            device,
+            non_blocking=True
+        )
+
+        with torch.cuda.amp.autocast(
+            enabled=USE_AMP
+        ):
+
+            outputs = model(
+                input_ids=input_ids,
+                labels=input_ids
+            )
+
+            loss = outputs.loss
+
+        total_loss += (
+            loss.item() * input_ids.size(0)
+        )
+
+        # GPT-2 predicts the next token.
+        # Compare each position's prediction
+        # against the following actual token.
+
+        predictions = outputs.logits[:, :-1, :].argmax(
+            dim=-1
+        )
+
+        targets = input_ids[:, 1:]
+
+        total_correct += (
+            predictions == targets
+        ).sum().item()
+
+        total_tokens += targets.numel()
+
+    processed_samples = min(
+        validation_steps * BATCH_SIZE,
+        len(loader.dataset)
+    )
+
+    average_loss = total_loss / processed_samples
+
+    accuracy = (
+        total_correct / total_tokens
+        if total_tokens > 0
+        else 0.0
+    )
+
+    perplexity = math.exp(
+        min(average_loss, 20)
+    )
+
+    return {
+        "loss": average_loss,
+        "accuracy": accuracy,
+        "perplexity": perplexity
+    }
+
+
+# =========================================================
+# 14. CHECKPOINT SAVING
+# =========================================================
+
+def save_checkpoint(
+    model,
+    tokenizer,
+    optimizer,
+    scheduler,
+    scaler,
+    epoch,
+    global_step
+):
+
+    os.makedirs(
+        CHECKPOINT_DIR,
+        exist_ok=True
+    )
+
+    # Save pretrained model architecture
+    # and fine-tuned weights.
+
+    model.save_pretrained(
+        CHECKPOINT_DIR,
+        safe_serialization=True
+    )
+
+    tokenizer.save_pretrained(
+        TOKENIZER_DIR
+    )
+
+    # Save optimizer and scheduler separately.
+
+    state = {
+        "epoch": epoch,
+        "global_step": global_step,
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "scaler": scaler.state_dict()
+    }
+
+    torch.save(
+        state,
+        os.path.join(
+            CHECKPOINT_DIR,
+            "training_state.pt"
+        )
+    )
+
+    print(
+        "\nCheckpoint saved:",
+        CHECKPOINT_DIR
+    )
+
+
+# =========================================================
+# 15. START TRAINING
+# =========================================================
+
+print("\n====================================")
+print("STARTING GPT-2 FINE-TUNING")
+print("====================================")
+
+for epoch in range(start_epoch, EPOCHS):
+
+    print("\n====================================")
+    print(f"EPOCH {epoch + 1}/{EPOCHS}")
+    print("====================================")
+
+    train_loss = train_one_epoch(
+        model,
+        train_loader,
+        optimizer,
+        scheduler,
+        scaler,
+        epoch
+    )
+
+    global_step += steps_per_epoch
+
+    print("\nTraining loss:", round(train_loss, 6))
+
+    # ---------------------------------------------
+    # Validation
+    # ---------------------------------------------
+
+    validation_results = evaluate_model(
+        model,
+        val_loader
+    )
+
+    print("\nValidation results:")
+
+    for name, value in validation_results.items():
+
+        print(f"{name}: {value:.6f}")
+
+    # ---------------------------------------------
+    # Save checkpoint
+    # ---------------------------------------------
+
+    save_checkpoint(
+        model,
+        tokenizer,
+        optimizer,
+        scheduler,
+        scaler,
+        epoch,
+        global_step
+    )
+
+    print("\nEpoch completed:", epoch + 1)
+
+
+# =========================================================
+# 16. SAVE FINAL MODEL
+# =========================================================
+
+FINAL_MODEL_DIR = os.path.join(
+    OUTPUT_DIR,
+    "final_model"
+)
+
+model.config.use_cache = True
+
+model.save_pretrained(
+    FINAL_MODEL_DIR,
+    safe_serialization=True
+)
+
+tokenizer.save_pretrained(
+    FINAL_MODEL_DIR
+)
+
+print("\nFinal model saved to:")
+print(FINAL_MODEL_DIR)
+
+
+# =========================================================
+# 17. FINAL VALIDATION
+# =========================================================
+
+final_results = evaluate_model(
+    model,
+    val_loader
+)
+
+print("\n====================================")
+print("FINAL VALIDATION RESULTS")
+print("====================================")
+
+for name, value in final_results.items():
+
+    print(f"{name}: {value:.6f}")
+
+
+# =========================================================
+# 18. TEXT GENERATION
+# =========================================================
+
+@torch.no_grad()
+def generate_text_greedy(
+    model,
+    tokenizer,
+    prompt,
+    max_gen=40
+):
+
+    model.eval()
+
+    inputs = tokenizer(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=False
+    )
+
+    input_ids = inputs["input_ids"].to(device)
+
+    if input_ids.shape[1] == 0:
+
+        raise ValueError(
+            "Prompt produced zero tokens."
+        )
+
+    # Keep the latest context.
+
+    input_ids = input_ids[:, -SEQ_LEN:]
+
+    generated_ids = model.generate(
+        input_ids=input_ids,
+        max_new_tokens=max_gen,
+        do_sample=False,
+        num_beams=1,
+        pad_token_id=tokenizer.eos_token_id,
+        eos_token_id=tokenizer.eos_token_id
+    )
+
+    return tokenizer.decode(
+        generated_ids[0],
+        skip_special_tokens=True
+    )
+
+
+# =========================================================
+# 19. TEST GENERATION
+# =========================================================
+
+result = generate_text_greedy(
+    model,
+    tokenizer,
+    "Mahatma Gandhi was",
+    max_gen=40
+)
+
+print("\n====================================")
+print("GENERATED TEXT")
+print("====================================")
+
+print(result)
+
+print("\nTraining completed successfully.")
+
+
+#===========================================================
+
+#-----------optimized---------------------
+
+
+import os
+import json
+import math
+import random
+import numpy as np
+import torch
+
+from torch.utils.data import Dataset, DataLoader
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM
+)
+
+# =========================================================
+# 0. CONFIGURATION
+# =========================================================
+
+DATA_FILE = (
+    "/kaggle/input/datasets/ravckumar/"
+    "context-renewed2/context_aggregated.txt"
+)
+
+MODEL_NAME = "gpt2"
+
+OUTPUT_DIR = "/kaggle/working/gpt2_finetuned"
+
+CHECKPOINT_DIR = os.path.join(
+    OUTPUT_DIR,
+    "last_checkpoint"
+)
+
+FINAL_MODEL_DIR = os.path.join(
+    OUTPUT_DIR,
+    "final_model"
+)
+
+SEED = 42
+
+# ---------------------------------------------------------
+# RESUME TRAINING
+# ---------------------------------------------------------
+
+# None = start from original pretrained GPT-2.
+#
+# To resume, set this to:
+# "/kaggle/working/gpt2_finetuned/last_checkpoint"
+
+RESUME_CHECKPOINT_DIR = None
+
+# ---------------------------------------------------------
+# DATASET
+# ---------------------------------------------------------
+
+TRAIN_RATIO = 0.97
+
+SEQ_LEN = 512
+STRIDE = 512
+
+# ---------------------------------------------------------
+# TRAINING
+# ---------------------------------------------------------
+
+BATCH_SIZE = 4
+EPOCHS = 3
+
+MAX_STEPS_PER_EPOCH = 5000
+MAX_VALIDATION_STEPS = 1000
+
+INITIAL_LR = 2e-5
+MIN_LR = 2e-6
+
+WARMUP_STEPS = 200
+WEIGHT_DECAY = 0.01
+
+MAX_GRAD_NORM = 1.0
+
+NUM_WORKERS = 2
+
+# ---------------------------------------------------------
+# MODEL OPTIMIZATION
+# ---------------------------------------------------------
+
+# GPT-2 small contains 12 transformer blocks.
+
+NUM_TRAINABLE_LAYERS = 3
+
+# First 9 blocks frozen.
+# Last 3 blocks trainable.
+
+FREEZE_EMBEDDINGS = True
+
+# Save final model in FP16.
+
+SAVE_FP16 = True
+
+
+# =========================================================
+# 1. REPRODUCIBILITY
+# =========================================================
+
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+
+device = torch.device(
+    "cuda" if torch.cuda.is_available() else "cpu"
+)
+
+USE_AMP = device.type == "cuda"
+
+print("Device:", device)
+print("Mixed precision:", USE_AMP)
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+
+
+# =========================================================
+# 2. LOAD TEXT CORPUS
+# =========================================================
+
+print("\nLoading corpus...")
+
+with open(DATA_FILE, "r", encoding="utf-8") as f:
+    text = f.read()
+
+print("Characters:", len(text))
+
+
+# =========================================================
+# 3. LOAD TOKENIZER
+# =========================================================
+
+print("\nLoading GPT-2 tokenizer...")
+
+if RESUME_CHECKPOINT_DIR is not None:
+
+    TOKENIZER_SOURCE = RESUME_CHECKPOINT_DIR
+
+else:
+
+    TOKENIZER_SOURCE = MODEL_NAME
+
+tokenizer = AutoTokenizer.from_pretrained(
+    TOKENIZER_SOURCE,
+    use_fast=True
+)
+
+# GPT-2 does not have a separate padding token.
+
+tokenizer.pad_token = tokenizer.eos_token
+
+print("Tokenizer:", TOKENIZER_SOURCE)
+print("Vocabulary:", tokenizer.vocab_size)
+print("EOS token:", tokenizer.eos_token)
+
+
+# =========================================================
+# 4. TOKENIZE CORPUS
+# =========================================================
+
+print("\nTokenizing corpus...")
+
+encoding = tokenizer(
+    text,
+    add_special_tokens=False,
+    return_attention_mask=False,
+    truncation=False
+)
+
+token_ids = np.asarray(
+    encoding["input_ids"],
+    dtype=np.int32
+)
+
+del encoding
+del text
+
+print("Total tokens:", len(token_ids))
+
+assert len(token_ids) > SEQ_LEN, (
+    "Corpus is smaller than SEQ_LEN."
+)
+
+
+# =========================================================
+# 5. TRAIN / VALIDATION SPLIT
+# =========================================================
+
+print("\nSplitting tokens...")
+
+split_index = int(
+    len(token_ids) * TRAIN_RATIO
+)
+
+train_tokens = token_ids[:split_index]
+
+val_tokens = token_ids[split_index:]
+
+print("Training tokens:", len(train_tokens))
+print("Validation tokens:", len(val_tokens))
+
+
+# =========================================================
+# 6. NEXT TOKEN DATASET
+# =========================================================
+
+class NextTokenDataset(Dataset):
+
+    def __init__(
+        self,
+        token_array,
+        seq_len,
+        stride
+    ):
+
+        self.tokens = token_array
+
+        self.seq_len = seq_len
+
+        self.stride = stride
+
+        self.starts = np.arange(
+            0,
+            len(token_array) - seq_len + 1,
+            stride,
+            dtype=np.int64
+        )
+
+    def __len__(self):
+
+        return len(self.starts)
+
+    def __getitem__(self, index):
+
+        start = self.starts[index]
+
+        end = start + self.seq_len
+
+        sequence = self.tokens[start:end]
+
+        return torch.tensor(
+            sequence.astype(np.int64),
+            dtype=torch.long
+        )
+
+
+train_dataset = NextTokenDataset(
+    train_tokens,
+    SEQ_LEN,
+    STRIDE
+)
+
+val_dataset = NextTokenDataset(
+    val_tokens,
+    SEQ_LEN,
+    STRIDE
+)
+
+print("\nDataset windows:")
+
+print("Training:", len(train_dataset))
+
+print("Validation:", len(val_dataset))
+
+
+# =========================================================
+# 7. DATALOADERS
+# =========================================================
+
+train_loader = DataLoader(
+    train_dataset,
+    batch_size=BATCH_SIZE,
+    shuffle=True,
+    drop_last=True,
+    num_workers=NUM_WORKERS,
+    pin_memory=USE_AMP
+)
+
+val_loader = DataLoader(
+    val_dataset,
+    batch_size=BATCH_SIZE,
+    shuffle=False,
+    drop_last=False,
+    num_workers=NUM_WORKERS,
+    pin_memory=USE_AMP
+)
+
+steps_per_epoch = min(
+    MAX_STEPS_PER_EPOCH,
+    len(train_loader)
+)
+
+validation_steps = min(
+    MAX_VALIDATION_STEPS,
+    len(val_loader)
+)
+
+if steps_per_epoch == 0 or validation_steps == 0:
+
+    raise ValueError(
+        "Insufficient training or validation batches."
+    )
+
+TOTAL_STEPS = steps_per_epoch * EPOCHS
+
+print("\nTraining configuration:")
+
+print("Batch size:", BATCH_SIZE)
+
+print("Steps per epoch:", steps_per_epoch)
+
+print("Validation steps:", validation_steps)
+
+print("Epochs:", EPOCHS)
+
+print("Total optimizer steps:", TOTAL_STEPS)
+
+
+# =========================================================
+# 8. LOAD PRETRAINED GPT-2
+# =========================================================
+
+print("\nLoading pretrained GPT-2...")
+
+if RESUME_CHECKPOINT_DIR is not None:
+
+    MODEL_SOURCE = RESUME_CHECKPOINT_DIR
+
+    if not os.path.exists(
+        os.path.join(MODEL_SOURCE, "config.json")
+    ):
+
+        raise FileNotFoundError(
+            "GPT-2 config.json not found."
+        )
+
+else:
+
+    MODEL_SOURCE = MODEL_NAME
+
+
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_SOURCE
+)
+
+model.config.use_cache = False
+
+model.config.pad_token_id = tokenizer.pad_token_id
+
+MODEL_CONTEXT = model.config.n_positions
+
+if SEQ_LEN > MODEL_CONTEXT:
+
+    raise ValueError(
+        f"SEQ_LEN={SEQ_LEN} exceeds GPT-2 "
+        f"context window={MODEL_CONTEXT}."
+    )
+
+
+# =========================================================
+# 9. FREEZE GPT-2 PARAMETERS
+# =========================================================
+
+print("\nApplying layer freezing...")
+
+# Freeze every parameter first.
+
+for param in model.parameters():
+
+    param.requires_grad = False
+
+
+# GPT-2 transformer blocks.
+
+total_layers = len(model.transformer.h)
+
+if NUM_TRAINABLE_LAYERS < 1:
+
+    raise ValueError(
+        "NUM_TRAINABLE_LAYERS must be at least 1."
+    )
+
+if NUM_TRAINABLE_LAYERS > total_layers:
+
+    raise ValueError(
+        "NUM_TRAINABLE_LAYERS exceeds total GPT-2 layers."
+    )
+
+
+# Calculate the first trainable layer.
+
+freeze_until = (
+    total_layers - NUM_TRAINABLE_LAYERS
+)
+
+
+# Unfreeze only the final transformer blocks.
+
+for layer_index in range(
+    freeze_until,
+    total_layers
+):
+
+    for param in model.transformer.h[layer_index].parameters():
+
+        param.requires_grad = True
+
+
+# Train final layer normalization.
+
+for param in model.transformer.ln_f.parameters():
+
+    param.requires_grad = True
+
+
+# Embeddings remain frozen.
+# GPT-2 LM head shares its weights with token embeddings.
+
+if FREEZE_EMBEDDINGS:
+
+    for param in model.transformer.wte.parameters():
+
+        param.requires_grad = False
+
+    for param in model.transformer.wpe.parameters():
+
+        param.requires_grad = False
+
+
+# Move model to device.
+
+model.to(device)
+
+
+# =========================================================
+# 10. PARAMETER STATISTICS
+# =========================================================
+
+total_parameters = sum(
+    p.numel()
+    for p in model.parameters()
+)
+
+trainable_parameters = sum(
+    p.numel()
+    for p in model.parameters()
+    if p.requires_grad
+)
+
+frozen_parameters = (
+    total_parameters - trainable_parameters
+)
+
+print("\n========== MODEL OPTIMIZATION ==========")
+
+print("Total layers:", total_layers)
+
+print("Frozen layers:", freeze_until)
+
+print("Trainable layers:", NUM_TRAINABLE_LAYERS)
+
+print("Total parameters:", f"{total_parameters:,}")
+
+print("Frozen parameters:", f"{frozen_parameters:,}")
+
+print("Trainable parameters:", f"{trainable_parameters:,}")
+
+print(
+    "Trainable percentage:",
+    round(
+        trainable_parameters /
+        total_parameters * 100,
+        2
+    ),
+    "%"
+)
+
+print("========================================")
+
+
+# =========================================================
+# 11. OPTIMIZER
+# =========================================================
+
+# Only trainable parameters enter AdamW.
+
+trainable_params = [
+    p
+    for p in model.parameters()
+    if p.requires_grad
+]
+
+optimizer = torch.optim.AdamW(
+    trainable_params,
+    lr=INITIAL_LR,
+    weight_decay=WEIGHT_DECAY
+)
+
+
+# =========================================================
+# 12. WARMUP + COSINE LR SCHEDULE
+# =========================================================
+
+def lr_lambda(current_step):
+
+    if current_step < WARMUP_STEPS:
+
+        return max(
+            (current_step + 1) /
+            max(WARMUP_STEPS, 1),
+            1e-8
+        )
+
+    progress = (
+        current_step - WARMUP_STEPS
+    ) / max(
+        TOTAL_STEPS - WARMUP_STEPS,
+        1
+    )
+
+    progress = min(
+        max(progress, 0.0),
+        1.0
+    )
+
+    cosine = 0.5 * (
+        1.0 + math.cos(math.pi * progress)
+    )
+
+    lr = (
+        MIN_LR
+        + (INITIAL_LR - MIN_LR) * cosine
+    )
+
+    return lr / INITIAL_LR
+
+
+scheduler = torch.optim.lr_scheduler.LambdaLR(
+    optimizer,
+    lr_lambda
+)
+
+
+# Mixed precision scaler.
+
+scaler = torch.cuda.amp.GradScaler(
+    enabled=USE_AMP
+)
+
+
+# =========================================================
+# 13. RESUME PREVIOUS TRAINING
+# =========================================================
+
+start_epoch = 0
+
+global_step = 0
+
+if RESUME_CHECKPOINT_DIR is not None:
+
+    state_path = os.path.join(
+        RESUME_CHECKPOINT_DIR,
+        "training_state.pt"
+    )
+
+    if not os.path.exists(state_path):
+
+        raise FileNotFoundError(
+            f"Training state not found: {state_path}"
+        )
+
+    print("\nRestoring training state...")
+
+    state = torch.load(
+        state_path,
+        map_location=device,
+        weights_only=False
+    )
+
+    optimizer.load_state_dict(
+        state["optimizer"]
+    )
+
+    scheduler.load_state_dict(
+        state["scheduler"]
+    )
+
+    if "scaler" in state:
+
+        scaler.load_state_dict(
+            state["scaler"]
+        )
+
+    start_epoch = state["epoch"] + 1
+
+    global_step = state["global_step"]
+
+    print("Previous epoch:", state["epoch"] + 1)
+
+    print("Resuming from epoch:", start_epoch)
+
+    print("Global step:", global_step)
+
+    del state
+
+    print("Training state restored.")
+
+else:
+
+    print("\nStarting fresh GPT-2 fine-tuning.")
+
+    print("Loading original pretrained GPT-2 weights.")
+
+
+# =========================================================
+# 14. KEEP FROZEN LAYERS IN EVALUATION MODE
+# =========================================================
+
+def set_training_mode(model):
+
+    model.train()
+
+    # Frozen transformer blocks must not use dropout.
+
+    for layer_index in range(freeze_until):
+
+        model.transformer.h[layer_index].eval()
+
+    # Embeddings are frozen.
+
+    if FREEZE_EMBEDDINGS:
+
+        model.transformer.wte.eval()
+
+        model.transformer.wpe.eval()
+
+    # Disable embedding dropout.
+
+    model.transformer.drop.eval()
+
+
+# =========================================================
+# 15. TRAINING FUNCTION
+# =========================================================
+
+def train_one_epoch(
+    model,
+    loader,
+    optimizer,
+    scheduler,
+    scaler,
+    epoch
+):
+
+    set_training_mode(model)
+
+    total_loss = 0.0
+
+    iterator = iter(loader)
+
+    for step in range(steps_per_epoch):
+
+        input_ids = next(iterator)
+
+        input_ids = input_ids.to(
+            device,
+            non_blocking=True
+        )
+
+        optimizer.zero_grad(
+            set_to_none=True
+        )
+
+        with torch.cuda.amp.autocast(
+            enabled=USE_AMP
+        ):
+
+            outputs = model(
+                input_ids=input_ids,
+
+                # GPT-2 internally shifts labels
+                # for causal next-token prediction.
+
+                labels=input_ids
+            )
+
+            loss = outputs.loss
+
+        scaler.scale(loss).backward()
+
+        scaler.unscale_(optimizer)
+
+        # Clip only trainable parameters.
+
+        torch.nn.utils.clip_grad_norm_(
+            trainable_params,
+            MAX_GRAD_NORM
+        )
+
+        scaler.step(optimizer)
+
+        scaler.update()
+
+        scheduler.step()
+
+        total_loss += loss.item()
+
+        current_lr = scheduler.get_last_lr()[0]
+
+        if (step + 1) % 100 == 0:
+
+            print(
+                f"Epoch {epoch + 1} | "
+                f"Step {step + 1}/{steps_per_epoch} | "
+                f"Loss: {loss.item():.4f} | "
+                f"LR: {current_lr:.8f}"
+            )
+
+    average_loss = (
+        total_loss / steps_per_epoch
+    )
+
+    return average_loss
+
+
+# =========================================================
+# 16. VALIDATION FUNCTION
+# =========================================================
+
+@torch.no_grad()
+def evaluate_model(
+    model,
+    loader
+):
+
+    model.eval()
+
+    total_loss = 0.0
+
+    total_correct = 0
+
+    total_tokens = 0
+
+    processed_samples = 0
+
+    for step, input_ids in enumerate(loader):
+
+        if step >= validation_steps:
+
+            break
+
+        input_ids = input_ids.to(
+            device,
+            non_blocking=True
+        )
+
+        with torch.cuda.amp.autocast(
+            enabled=USE_AMP
+        ):
+
+            outputs = model(
+                input_ids=input_ids,
+                labels=input_ids
+            )
+
+            loss = outputs.loss
+
+        batch_size = input_ids.size(0)
+
+        total_loss += (
+            loss.item() * batch_size
+        )
+
+        processed_samples += batch_size
+
+        # Next-token prediction.
+
+        predictions = outputs.logits[:, :-1, :].argmax(
+            dim=-1
+        )
+
+        targets = input_ids[:, 1:]
+
+        total_correct += (
+            predictions == targets
+        ).sum().item()
+
+        total_tokens += targets.numel()
+
+    average_loss = (
+        total_loss / processed_samples
+        if processed_samples > 0
+        else 0.0
+    )
+
+    accuracy = (
+        total_correct / total_tokens
+        if total_tokens > 0
+        else 0.0
+    )
+
+    perplexity = math.exp(
+        min(average_loss, 20)
+    )
+
+    return {
+        "loss": average_loss,
+        "accuracy": accuracy,
+        "perplexity": perplexity
+    }
+
+
+# =========================================================
+# 17. CHECKPOINT SAVING
+# =========================================================
+
+def save_checkpoint(
+    model,
+    tokenizer,
+    optimizer,
+    scheduler,
+    scaler,
+    epoch,
+    global_step
+):
+
+    os.makedirs(
+        CHECKPOINT_DIR,
+        exist_ok=True
+    )
+
+    # Save the complete model in original precision.
+
+    model.save_pretrained(
+        CHECKPOINT_DIR,
+        safe_serialization=True
+    )
+
+    tokenizer.save_pretrained(
+        CHECKPOINT_DIR
+    )
+
+    # Save optimizer and scheduler separately.
+
+    state = {
+
+        "epoch": epoch,
+
+        "global_step": global_step,
+
+        "optimizer": optimizer.state_dict(),
+
+        "scheduler": scheduler.state_dict(),
+
+        "scaler": scaler.state_dict(),
+
+        "num_trainable_layers": NUM_TRAINABLE_LAYERS,
+
+        "freeze_embeddings": FREEZE_EMBEDDINGS
+    }
+
+    torch.save(
+        state,
+        os.path.join(
+            CHECKPOINT_DIR,
+            "training_state.pt"
+        )
+    )
+
+    print(
+        "\nCheckpoint saved:",
+        CHECKPOINT_DIR
+    )
+
+
+# =========================================================
+# 18. START TRAINING
+# =========================================================
+
+print("\n====================================")
+
+print("STARTING GPT-2 FINE-TUNING")
+
+print("====================================")
+
+
+if start_epoch >= EPOCHS:
+
+    raise ValueError(
+        "Training is already complete for the configured "
+        "EPOCHS. Increase EPOCHS to continue training."
+    )
+
+
+for epoch in range(start_epoch, EPOCHS):
+
+    print("\n====================================")
+
+    print(f"EPOCH {epoch + 1}/{EPOCHS}")
+
+    print("====================================")
+
+    train_loss = train_one_epoch(
+        model,
+        train_loader,
+        optimizer,
+        scheduler,
+        scaler,
+        epoch
+    )
+
+    global_step += steps_per_epoch
+
+    print(
+        "\nTraining loss:",
+        round(train_loss, 6)
+    )
+
+    # -----------------------------------------------------
+    # VALIDATION
+    # -----------------------------------------------------
+
+    validation_results = evaluate_model(
+        model,
+        val_loader
+    )
+
+    print("\nValidation results:")
+
+    for name, value in validation_results.items():
+
+        print(
+            f"{name}: {value:.6f}"
+        )
+
+    # -----------------------------------------------------
+    # CHECKPOINT
+    # -----------------------------------------------------
+
+    save_checkpoint(
+        model,
+        tokenizer,
+        optimizer,
+        scheduler,
+        scaler,
+        epoch,
+        global_step
+    )
+
+    print(
+        "\nEpoch completed:",
+        epoch + 1
+    )
+
+
+# =========================================================
+# 19. FINAL VALIDATION
+# =========================================================
+
+print("\nRunning final validation...")
+
+final_results = evaluate_model(
+    model,
+    val_loader
+)
+
+print("\n====================================")
+
+print("FINAL VALIDATION RESULTS")
+
+print("====================================")
+
+for name, value in final_results.items():
+
+    print(
+        f"{name}: {value:.6f}"
+    )
+
+
+# =========================================================
+# 20. SAVE FINAL DEPLOYMENT MODEL
+# =========================================================
+
+print("\nSaving final deployment model...")
+
+os.makedirs(
+    FINAL_MODEL_DIR,
+    exist_ok=True
+)
+
+model.config.use_cache = True
+
+# Convert full model to FP16 for smaller storage.
+
+if SAVE_FP16:
+
+    model.half()
+
+    print("Saving model in FP16.")
+
+else:
+
+    print("Saving model in FP32.")
+
+model.save_pretrained(
+    FINAL_MODEL_DIR,
+    safe_serialization=True
+)
+
+tokenizer.save_pretrained(
+    FINAL_MODEL_DIR
+)
+
+print("\nFinal model saved to:")
+
+print(FINAL_MODEL_DIR)
+
+
+# =========================================================
+# 21. MODEL SIZE
+# =========================================================
+
+def get_directory_size(path):
+
+    total_size = 0
+
+    for root, dirs, files in os.walk(path):
+
+        for file in files:
+
+            file_path = os.path.join(
+                root,
+                file
+            )
+
+            total_size += os.path.getsize(
+                file_path
+            )
+
+    return total_size / (1024 ** 2)
+
+
+model_size = get_directory_size(
+    FINAL_MODEL_DIR
+)
+
+print("\nFinal model size:")
+
+print(f"{model_size:.2f} MB")
+
+
+# =========================================================
+# 22. TEXT GENERATION
+# =========================================================
+
+@torch.no_grad()
+def generate_text_greedy(
+    model,
+    tokenizer,
+    prompt,
+    max_gen=40
+):
+
+    model.eval()
+
+    inputs = tokenizer(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=False
+    )
+
+    input_ids = inputs["input_ids"].to(device)
+
+    if input_ids.shape[1] == 0:
+
+        raise ValueError(
+            "Prompt produced zero tokens."
+        )
+
+    input_ids = input_ids[:, -SEQ_LEN:]
+
+    generated_ids = model.generate(
+        input_ids=input_ids,
+        max_new_tokens=max_gen,
+        do_sample=False,
+        num_beams=1,
+        pad_token_id=tokenizer.eos_token_id,
+        eos_token_id=tokenizer.eos_token_id
+    )
+    return tokenizer.decode(
+        generated_ids[0],
+        skip_special_tokens=True
+    )
+
+
+# =========================================================
+# 23. TEST GENERATION
+# =========================================================
+
+result = generate_text_greedy(
+    model,
+    tokenizer,
+    "Mahatma Gandhi was",
+    max_gen=40
+)
+
+print("\n====================================")
+
+print("GENERATED TEXT")
+
+print("====================================")
+
+print(result)
+
+print("\nTraining completed successfully.")
+
+
+#-----------------insttruction_tuning------------------
+
+
+# =========================================================
+# GPT-2 PRETRAINED TRANSFORMER
+# ANSWER-ONLY INSTRUCTION FINE-TUNING
+# FP16 MIXED PRECISION + LAYER FREEZING
+# =========================================================
+
+import os
+import json
+import math
+import random
+import numpy as np
+import torch
+
+from torch.utils.data import Dataset, DataLoader
+
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM
+)
+
+# =========================================================
+# 0. CONFIGURATION
+# =========================================================
+
+DATA_FILE = (
+    "/kaggle/input/datasets/ravckumar/"
+    "combined-question-answers4/"
+    "combined_questions_answers.json"
+)
+
+
+PRETRAINED_MODEL = "gpt2"
+
+OUTPUT_DIR = "/kaggle/working/instruction_tuning"
+
+CHECKPOINT_DIR = os.path.join(
+    OUTPUT_DIR,
+    "checkpoint"
+)
+
+FINAL_MODEL_DIR = os.path.join(
+    OUTPUT_DIR,
+    "final_model"
+)
+
+FP16_MODEL_DIR = os.path.join(
+    OUTPUT_DIR,
+    "final_model_fp16"
+)
+
+TOKENIZER_DIR = os.path.join(
+    OUTPUT_DIR,
+    "tokenizer"
+)
+
+# ---------------------------------------------------------
+# Dataset
+# ---------------------------------------------------------
+
+SEQ_LEN = 256
+TRAIN_RATIO = 0.98
+SEED = 42
+
+# ---------------------------------------------------------
+# Training
+# ---------------------------------------------------------
+
+BATCH_SIZE = 4
+
+GRADIENT_ACCUMULATION_STEPS = 4
+
+EPOCHS = 20
+
+INITIAL_LR = 1e-5
+MIN_LR = 1e-6
+
+WARMUP_RATIO = 0.05
+
+WEIGHT_DECAY = 0.01
+
+MAX_GRAD_NORM = 1.0
+
+NUM_WORKERS = 2
+
+# ---------------------------------------------------------
+# Layer freezing
+# ---------------------------------------------------------
+
+NUM_FROZEN_LAYERS = 8
+
+# GPT-2 contains 12 Transformer blocks.
+# First 8 frozen, last 4 trainable.
+
+# ---------------------------------------------------------
+# Mixed precision
+# ---------------------------------------------------------
+
+USE_FP16 = True
+
+# ---------------------------------------------------------
+# Resume training
+# ---------------------------------------------------------
+
+RESUME_TRAINING = False
+
+RESUME_CHECKPOINT = CHECKPOINT_DIR
+
+
+# =========================================================
+# 1. REPRODUCIBILITY
+# =========================================================
+
+random.seed(SEED)
+np.random.seed(SEED)
+
+torch.manual_seed(SEED)
+
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+
+device = torch.device(
+    "cuda" if torch.cuda.is_available() else "cpu"
+)
+
+USE_AMP = (
+    USE_FP16
+    and device.type == "cuda"
+)
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+print("Device:", device)
+print("FP16 mixed precision:", USE_AMP)
+
+
+# =========================================================
+# 2. LOAD QUESTION-ANSWER DATA
+# =========================================================
+
+print("\nLoading QA dataset...")
+
+with open(DATA_FILE, "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+if not isinstance(data, list):
+    raise ValueError(
+        "Expected a JSON list of QA objects."
+    )
+
+qa_pairs = []
+
+for item in data:
+
+    if not isinstance(item, dict):
+        continue
+
+    question = str(
+        item.get("question", "")
+    ).strip()
+
+    answer = str(
+        item.get("answer", "")
+    ).strip()
+
+    if question and answer:
+        qa_pairs.append(
+            (question, answer)
+        )
+
+if len(qa_pairs) < 2:
+    raise ValueError(
+        "At least two valid QA pairs are required."
+    )
+
+print("Valid QA pairs:", len(qa_pairs))
+
+
+# =========================================================
+# 3. LOAD GPT-2 TOKENIZER
+# =========================================================
+
+print("\nLoading pretrained GPT-2 tokenizer...")
+
+TOKENIZER_SOURCE = (
+    RESUME_CHECKPOINT
+    if RESUME_TRAINING
+    else PRETRAINED_MODEL
+)
+
+tokenizer = AutoTokenizer.from_pretrained(
+    TOKENIZER_SOURCE,
+    use_fast=True
+)
+
+# GPT-2 does not have a separate padding token.
+# Use EOS for padding, but mask padding from the loss.
+
+tokenizer.pad_token = tokenizer.eos_token
+
+PAD_ID = tokenizer.pad_token_id
+
+EOS_ID = tokenizer.eos_token_id
+
+print("Tokenizer:", TOKENIZER_SOURCE)
+print("Vocabulary:", tokenizer.vocab_size)
+print("PAD ID:", PAD_ID)
+print("EOS ID:", EOS_ID)
+
+
+# =========================================================
+# 4. INSTRUCTION FORMAT
+# =========================================================
+
+QUESTION_PREFIX_IDS = tokenizer.encode(
+    "Question: ",
+    add_special_tokens=False
+)
+
+ANSWER_PREFIX_IDS = tokenizer.encode(
+    "\nAnswer: ",
+    add_special_tokens=False
+)
+
+END_IDS = tokenizer.encode(
+    "\nEnd of answer.",
+    add_special_tokens=False
+)
+
+print("\nInstruction formatting initialized.")
+
+
+# =========================================================
+# 5. ENCODE QUESTION-ANSWER PAIRS
+# =========================================================
+
+def encode_qa(
+    question,
+    answer,
+    seq_len
+):
+
+    question_ids = tokenizer.encode(
+        question,
+        add_special_tokens=False
+    )
+
+    answer_ids = tokenizer.encode(
+        answer,
+        add_special_tokens=False
+    )
+
+    # Reserve space for:
+    # Question prefix
+    # Answer prefix
+    # Ending phrase
+    # EOS
+    # At least one answer token
+
+    fixed_overhead = (
+        len(QUESTION_PREFIX_IDS)
+        + len(ANSWER_PREFIX_IDS)
+        + len(END_IDS)
+        + 1
+    )
+
+    max_question_tokens = max(
+        0,
+        seq_len - fixed_overhead - 1
+    )
+
+    question_ids = question_ids[
+        :max_question_tokens
+    ]
+
+    prompt_ids = (
+        QUESTION_PREFIX_IDS
+        + question_ids
+        + ANSWER_PREFIX_IDS
+    )
+
+    answer_capacity = (
+        seq_len
+        - len(prompt_ids)
+        - len(END_IDS)
+        - 1
+    )
+
+    if answer_capacity < 1:
+        return None
+
+    answer_ids = answer_ids[
+        :answer_capacity
+    ]
+
+    if not answer_ids:
+        return None
+
+    # Complete sequence.
+
+    token_ids = (
+        prompt_ids
+        + answer_ids
+        + END_IDS
+        + [EOS_ID]
+    )
+
+    # -----------------------------------------------------
+    # ANSWER-ONLY LABELS
+    # -----------------------------------------------------
+
+    # Ignore all question and answer-prefix tokens.
+    # Train only answer, ending phrase and EOS.
+
+    labels = (
+        [-100] * len(prompt_ids)
+        + answer_ids
+        + END_IDS
+        + [EOS_ID]
+    )
+
+    # -----------------------------------------------------
+    # ATTENTION MASK
+    # -----------------------------------------------------
+
+    attention_mask = [1] * len(token_ids)
+
+    # -----------------------------------------------------
+    # PADDING
+    # -----------------------------------------------------
+
+    padding_length = seq_len - len(token_ids)
+
+    if padding_length < 0:
+        return None
+
+    token_ids += (
+        [PAD_ID] * padding_length
+    )
+
+    attention_mask += (
+        [0] * padding_length
+    )
+
+    labels += (
+        [-100] * padding_length
+    )
+
+    return (
+        token_ids,
+        attention_mask,
+        labels
+    )
+
+
+# =========================================================
+# 6. BUILD ENCODED DATASET
+# =========================================================
+
+print("\nEncoding QA examples...")
+
+examples = []
+
+for index, (question, answer) in enumerate(qa_pairs):
+
+    encoded = encode_qa(
+        question,
+        answer,
+        SEQ_LEN
+    )
+
+    if encoded is not None:
+        examples.append(encoded)
+
+    if (index + 1) % 1000 == 0:
+
+        print(
+            f"Encoded {index + 1}/{len(qa_pairs)}"
+        )
+
+if len(examples) < 2:
+    raise ValueError(
+        "Insufficient valid examples."
+    )
+
+print("Successfully encoded:", len(examples))
+
+
+# =========================================================
+# 7. TRAIN / VALIDATION SPLIT
+# =========================================================
+
+indices = np.random.permutation(
+    len(examples)
+)
+
+split_index = int(
+    len(indices) * TRAIN_RATIO
+)
+
+split_index = min(
+    max(split_index, 1),
+    len(indices) - 1
+)
+
+train_indices = indices[:split_index]
+
+val_indices = indices[split_index:]
+
+train_examples = [
+    examples[i] for i in train_indices
+]
+
+val_examples = [
+    examples[i] for i in val_indices
+]
+
+print("\nTraining examples:", len(train_examples))
+print("Validation examples:", len(val_examples))
+
+
+# =========================================================
+# 8. PYTORCH DATASET
+# =========================================================
+
+class InstructionDataset(Dataset):
+
+    def __init__(self, examples):
+
+        self.examples = examples
+
+    def __len__(self):
+
+        return len(self.examples)
+
+    def __getitem__(self, index):
+
+        input_ids, attention_mask, labels = (
+            self.examples[index]
+        )
+
+        return {
+            "input_ids": torch.tensor(
+                input_ids,
+                dtype=torch.long
+            ),
+
+            "attention_mask": torch.tensor(
+                attention_mask,
+                dtype=torch.long
+            ),
+
+            "labels": torch.tensor(
+                labels,
+                dtype=torch.long
+            )
+        }
+
+
+train_dataset = InstructionDataset(
+    train_examples
+)
+
+val_dataset = InstructionDataset(
+    val_examples
+)
+
+
+# =========================================================
+# 9. DATALOADERS
+# =========================================================
+
+train_loader = DataLoader(
+    train_dataset,
+    batch_size=BATCH_SIZE,
+    shuffle=True,
+    drop_last=False,
+    num_workers=NUM_WORKERS,
+    pin_memory=USE_AMP
+)
+
+val_loader = DataLoader(
+    val_dataset,
+    batch_size=BATCH_SIZE,
+    shuffle=False,
+    drop_last=False,
+    num_workers=NUM_WORKERS,
+    pin_memory=USE_AMP
+)
+
+steps_per_epoch = len(train_loader)
+
+updates_per_epoch = math.ceil(
+    steps_per_epoch / GRADIENT_ACCUMULATION_STEPS
+)
+
+TOTAL_STEPS = updates_per_epoch * EPOCHS
+
+WARMUP_STEPS = int(
+    TOTAL_STEPS * WARMUP_RATIO
+)
+
+print("\nTraining configuration:")
+
+print("Batch size:", BATCH_SIZE)
+
+print(
+    "Gradient accumulation:",
+    GRADIENT_ACCUMULATION_STEPS
+)
+
+print("Steps per epoch:", steps_per_epoch)
+
+print("Optimizer updates per epoch:", updates_per_epoch)
+
+print("Total optimizer steps:", TOTAL_STEPS)
+
+print("Warmup steps:", WARMUP_STEPS)
+
+
+# =========================================================
+# 10. LOAD PRETRAINED GPT-2
+# =========================================================
+
+print("\nLoading pretrained GPT-2 model...")
+
+MODEL_SOURCE = (
+    RESUME_CHECKPOINT
+    if RESUME_TRAINING
+    else PRETRAINED_MODEL
+)
+
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_SOURCE
+)
+
+model.config.pad_token_id = PAD_ID
+
+model.config.use_cache = False
+
+if SEQ_LEN > model.config.n_positions:
+    raise ValueError(
+        "Sequence length exceeds GPT-2 context window."
+    )
+
+print("GPT-2 loaded successfully.")
+
+print("Transformer layers:", model.config.n_layer)
+
+print("Hidden dimension:", model.config.n_embd)
+
+
+# =========================================================
+# 11. FREEZE LOWER TRANSFORMER LAYERS
+# =========================================================
+
+def configure_trainable_layers(model):
+
+    transformer = model.transformer
+
+    total_layers = len(
+        transformer.h
+    )
+
+    if NUM_FROZEN_LAYERS >= total_layers:
+        raise ValueError(
+            "At least one Transformer layer must remain trainable."
+        )
+
+    # -----------------------------------------------------
+    # Freeze token embeddings
+    # -----------------------------------------------------
+
+    transformer.wte.weight.requires_grad = False
+
+    # -----------------------------------------------------
+    # Freeze positional embeddings
+    # -----------------------------------------------------
+
+    transformer.wpe.weight.requires_grad = False
+
+    # -----------------------------------------------------
+    # Freeze first 8 Transformer blocks
+    # -----------------------------------------------------
+
+    for i in range(NUM_FROZEN_LAYERS):
+
+        for parameter in transformer.h[i].parameters():
+
+            parameter.requires_grad = False
+
+    # -----------------------------------------------------
+    # Unfreeze last 4 Transformer blocks
+    # -----------------------------------------------------
+
+    for i in range(
+        NUM_FROZEN_LAYERS,
+        total_layers
+    ):
+
+        for parameter in transformer.h[i].parameters():
+
+            parameter.requires_grad = True
+
+    # -----------------------------------------------------
+    # Train final layer normalization
+    # -----------------------------------------------------
+
+    for parameter in transformer.ln_f.parameters():
+
+        parameter.requires_grad = True
+
+    # -----------------------------------------------------
+    # LM HEAD
+    # -----------------------------------------------------
+
+    # GPT-2 ties lm_head weights to token embeddings.
+    # Since embeddings are frozen, the tied head is frozen too.
+
+    print("\nLayer trainability:")
+
+    for i, layer in enumerate(transformer.h):
+
+        trainable = any(
+            p.requires_grad
+            for p in layer.parameters()
+        )
+
+        status = (
+            "TRAINABLE"
+            if trainable
+            else "FROZEN"
+        )
+
+        print(
+            f"Transformer layer {i + 1:02d}: {status}"
+        )
+
+    print("Token embeddings: FROZEN")
+    print("Position embeddings: FROZEN")
+    print("Final layer norm: TRAINABLE")
+    print("Tied LM head: FROZEN")
+
+
+configure_trainable_layers(model)
+
+model.to(device)
+
+
+# =========================================================
+# 12. PARAMETER SUMMARY
+# =========================================================
+
+total_params = sum(
+    p.numel()
+    for p in model.parameters()
+)
+
+trainable_params = sum(
+    p.numel()
+    for p in model.parameters()
+    if p.requires_grad
+)
+
+frozen_params = (
+    total_params - trainable_params
+)
+
+print("\n====================================")
+print("PARAMETER SUMMARY")
+print("====================================")
+
+print("Total parameters:", total_params)
+
+print("Trainable parameters:", trainable_params)
+
+print("Frozen parameters:", frozen_params)
+
+print(
+    "Trainable percentage:",
+    round(
+        100 * trainable_params / total_params,
+        2
+    ),
+    "%"
+)
+
+
+# =========================================================
+# 13. OPTIMIZER
+# =========================================================
+
+optimizer = torch.optim.AdamW(
+    [
+        p for p in model.parameters()
+        if p.requires_grad
+    ],
+    lr=INITIAL_LR,
+    weight_decay=WEIGHT_DECAY
+)
+
+
+# =========================================================
+# 14. WARMUP + COSINE LR SCHEDULER
+# =========================================================
+
+def lr_lambda(current_step):
+
+    if current_step < WARMUP_STEPS:
+
+        return (
+            (current_step + 1)
+            / max(WARMUP_STEPS, 1)
+        )
+
+    progress = (
+        current_step - WARMUP_STEPS
+    ) / max(
+        TOTAL_STEPS - WARMUP_STEPS,
+        1
+    )
+
+    progress = min(
+        max(progress, 0.0),
+        1.0
+    )
+
+    cosine = 0.5 * (
+        1.0 + math.cos(math.pi * progress)
+    )
+
+    current_lr = (
+        MIN_LR
+        + (INITIAL_LR - MIN_LR) * cosine
+    )
+
+    return current_lr / INITIAL_LR
+
+
+scheduler = torch.optim.lr_scheduler.LambdaLR(
+    optimizer,
+    lr_lambda
+)
+
+
+# =========================================================
+# 15. FP16 GRADIENT SCALER
+# =========================================================
+
+scaler = torch.cuda.amp.GradScaler(
+    enabled=USE_AMP
+)
+
+
+# =========================================================
+# 16. RESUME PREVIOUS TRAINING
+# =========================================================
+
+start_epoch = 0
+
+global_step = 0
+
+if RESUME_TRAINING:
+
+    state_path = os.path.join(
+        RESUME_CHECKPOINT,
+        "training_state.pt"
+    )
+
+    if not os.path.exists(state_path):
+
+        raise FileNotFoundError(
+            "Optimizer checkpoint not found."
+        )
+
+    checkpoint = torch.load(
+        state_path,
+        map_location=device,
+        weights_only=False
+    )
+
+    optimizer.load_state_dict(
+        checkpoint["optimizer"]
+    )
+
+    scheduler.load_state_dict(
+        checkpoint["scheduler"]
+    )
+
+    scaler.load_state_dict(
+        checkpoint["scaler"]
+    )
+
+    start_epoch = (
+        checkpoint["epoch"] + 1
+    )
+
+    global_step = checkpoint["global_step"]
+
+    print("\nPrevious training restored.")
+
+    print("Starting epoch:", start_epoch + 1)
+
+    print("Global step:", global_step)
+
+
+# =========================================================
+# 17. TRAINING FUNCTION
+# =========================================================
+
+def train_one_epoch(
+    model,
+    loader,
+    epoch
+):
+
+    model.train()
+
+    total_loss = 0.0
+
+    optimizer.zero_grad(
+        set_to_none=True
+    )
+
+    for step, batch in enumerate(loader):
+
+        input_ids = batch["input_ids"].to(
+            device,
+            non_blocking=True
+        )
+
+        attention_mask = batch["attention_mask"].to(
+            device,
+            non_blocking=True
+        )
+
+        labels = batch["labels"].to(
+            device,
+            non_blocking=True
+        )
+
+        # Correct scaling for the final incomplete
+        # gradient accumulation group.
+
+        group_start = (
+            step // GRADIENT_ACCUMULATION_STEPS
+        ) * GRADIENT_ACCUMULATION_STEPS
+
+        group_size = min(
+            GRADIENT_ACCUMULATION_STEPS,
+            len(loader) - group_start
+        )
+
+        with torch.cuda.amp.autocast(
+            enabled=USE_AMP,
+            dtype=torch.float16
+        ):
+
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels
+            )
+
+            # GPT-2 automatically shifts labels
+            # internally for next-token prediction.
+
+            loss = outputs.loss
+
+            scaled_loss = loss / group_size
+
+        scaler.scale(
+            scaled_loss
+        ).backward()
+
+        total_loss += loss.item()
+
+        is_update_step = (
+            (step + 1) % GRADIENT_ACCUMULATION_STEPS == 0
+            or (step + 1) == len(loader)
+        )
+
+        if is_update_step:
+
+            scaler.unscale_(optimizer)
+
+            torch.nn.utils.clip_grad_norm_(
+                [
+                    p for p in model.parameters()
+                    if p.requires_grad
+                ],
+                MAX_GRAD_NORM
+            )
+
+            scaler.step(optimizer)
+
+            scaler.update()
+
+            optimizer.zero_grad(
+                set_to_none=True
+            )
+
+            scheduler.step()
+
+            global_step += 1
+
+        if (step + 1) % 50 == 0:
+
+            print(
+                f"Epoch {epoch + 1}/{EPOCHS} | "
+                f"Step {step + 1}/{len(loader)} | "
+                f"Loss: {loss.item():.4f} | "
+                f"LR: {scheduler.get_last_lr()[0]:.8f}"
+            )
+
+    return total_loss / len(loader)
+
+
+# =========================================================
+# 18. VALIDATION FUNCTION
+# =========================================================
+
+@torch.no_grad()
+def evaluate_model(
+    model,
+    loader
+):
+
+    model.eval()
+
+    total_loss = 0.0
+
+    total_batches = 0
+
+    correct_tokens = 0
+
+    total_tokens = 0
+
+    for batch in loader:
+
+        input_ids = batch["input_ids"].to(
+            device,
+            non_blocking=True
+        )
+
+        attention_mask = batch["attention_mask"].to(
+            device,
+            non_blocking=True
+        )
+
+        labels = batch["labels"].to(
+            device,
+            non_blocking=True
+        )
+
+        with torch.cuda.amp.autocast(
+            enabled=USE_AMP,
+            dtype=torch.float16
+        ):
+
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels
+            )
+
+            loss = outputs.loss
+
+        total_loss += loss.item()
+
+        total_batches += 1
+
+        # Compare next-token predictions against
+        # answer-only labels, excluding ignored positions.
+
+        predictions = outputs.logits[:, :-1, :].argmax(
+            dim=-1
+        )
+
+        targets = labels[:, 1:]
+
+        valid_mask = targets != -100
+
+        correct_tokens += (
+            (
+                predictions == targets
+            ) & valid_mask
+        ).sum().item()
+
+        total_tokens += valid_mask.sum().item()
+
+    average_loss = (
+        total_loss / max(total_batches, 1)
+    )
+
+    accuracy = (
+        correct_tokens / total_tokens
+        if total_tokens > 0
+        else 0.0
+    )
+
+    perplexity = math.exp(
+        min(average_loss, 20)
+    )
+
+    return {
+        "loss": average_loss,
+        "accuracy": accuracy,
+        "perplexity": perplexity
+    }
+
+
+# =========================================================
+# 19. SAVE CHECKPOINT
+# =========================================================
+
+def save_checkpoint(
+    model,
+    tokenizer,
+    optimizer,
+    scheduler,
+    scaler,
+    epoch,
+    global_step
+):
+
+    os.makedirs(
+        CHECKPOINT_DIR,
+        exist_ok=True
+    )
+
+    # Save model weights and configuration.
+
+    model.save_pretrained(
+        CHECKPOINT_DIR,
+        safe_serialization=True
+    )
+
+    tokenizer.save_pretrained(
+        CHECKPOINT_DIR
+    )
+
+    # Save optimizer separately.
+
+    state = {
+        "epoch": epoch,
+        "global_step": global_step,
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "scaler": scaler.state_dict()
+    }
+
+    torch.save(
+        state,
+        os.path.join(
+            CHECKPOINT_DIR,
+            "training_state.pt"
+        )
+    )
+
+    print(
+        "\nCheckpoint saved:",
+        CHECKPOINT_DIR
+    )
+
+
+# =========================================================
+# 20. START INSTRUCTION TUNING
+# =========================================================
+
+print("\n====================================")
+print("STARTING GPT-2 INSTRUCTION TUNING")
+print("====================================")
+
+best_val_loss = float("inf")
+
+for epoch in range(
+    start_epoch,
+    EPOCHS
+):
+
+    print("\n====================================")
+    print(f"EPOCH {epoch + 1}/{EPOCHS}")
+    print("====================================")
+
+    train_loss = train_one_epoch(
+        model,
+        train_loader,
+        epoch
+    )
+
+    validation_results = evaluate_model(
+        model,
+        val_loader
+    )
+
+    print("\nTraining loss:", train_loss)
+
+    print("\nValidation results:")
+
+    for name, value in validation_results.items():
+
+        print(
+            f"{name}: {value:.6f}"
+        )
+
+    # Save latest checkpoint for resuming.
+
+    save_checkpoint(
+        model,
+        tokenizer,
+        optimizer,
+        scheduler,
+        scaler,
+        epoch,
+        global_step
+    )
+
+    # Save best model separately.
+
+    if validation_results["loss"] < best_val_loss:
+
+        best_val_loss = validation_results["loss"]
+
+        model.save_pretrained(
+            FINAL_MODEL_DIR,
+            safe_serialization=True
+        )
+
+        tokenizer.save_pretrained(
+            FINAL_MODEL_DIR
+        )
+
+        print("\nBest model updated.")
+
+    print("\nEpoch completed:", epoch + 1)
+
+
+# =========================================================
+# 21. LOAD BEST MODEL
+# =========================================================
+
+print("\nLoading best instruction-tuned model...")
+
+model = AutoModelForCausalLM.from_pretrained(
+    FINAL_MODEL_DIR
+).to(device)
+
+model.eval()
+
+print("Best model loaded.")
+
+
+# =========================================================
+# 22. EXPORT FP16 MODEL
+# =========================================================
+
+print("\nExporting FP16 model...")
+
+fp16_model = AutoModelForCausalLM.from_pretrained(
+    FINAL_MODEL_DIR,
+    torch_dtype=torch.float16,
+    low_cpu_mem_usage=True
+)
+
+fp16_model.config.use_cache = True
+
+fp16_model.save_pretrained(
+    FP16_MODEL_DIR,
+    safe_serialization=True
+)
+
+tokenizer.save_pretrained(
+    FP16_MODEL_DIR
+)
+
+del fp16_model
+
+print("FP16 model saved:", FP16_MODEL_DIR)
+
+
+# =========================================================
+# 23. GENERATE ANSWERS
+# =========================================================
+
+@torch.no_grad()
+def generate_answer(
+    model,
+    tokenizer,
+    question,
+    max_gen=150
+):
+
+    model.eval()
+
+    prompt = (
+        f"Question: {question}\n"
+        f"Answer:"
+    )
+
+    inputs = tokenizer(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=False
+    )
+
+    input_ids = inputs["input_ids"].to(device)
+
+    attention_mask = inputs["attention_mask"].to(device)
+
+    if input_ids.shape[1] >= SEQ_LEN:
+
+        input_ids = input_ids[:, -(SEQ_LEN - 1):]
+
+        attention_mask = attention_mask[:, -(SEQ_LEN - 1):]
+
+    generated = model.generate(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        max_new_tokens=max_gen,
+        do_sample=False,
+        num_beams=1,
+        pad_token_id=EOS_ID,
+        eos_token_id=EOS_ID
+    )
+
+    new_tokens = generated[
+        0,
+        input_ids.shape[1]:
+    ]
+
+    answer = tokenizer.decode(
+        new_tokens,
+        skip_special_tokens=True
+    )
+
+    # Remove the ordinary-text ending marker
+    # if it was generated.
+
+    answer = answer.split(
+        "End of answer."
+    )[0]
+
+    return answer.strip()
+
+
+# =========================================================
+# 24. TEST GENERATION
+# =========================================================
+
+question = "What is Google App Engine?"
+
+answer = generate_answer(
+    model,
+    tokenizer,
+    question,
+    max_gen=150
+)
+
+print("\n====================================")
+print("INSTRUCTION TUNING RESULT")
+print("====================================")
+
+print("Question:", question)
+
+print("Generated answer:", answer)
+
+
+# =========================================================
+# 25. FINAL SUMMARY
+# =========================================================
+
+print("\n====================================")
+print("TRAINING COMPLETED")
+print("====================================")
+
+print("Best model:", FINAL_MODEL_DIR)
+
+print("FP16 model:", FP16_MODEL_DIR)
+
+print("Tokenizer:", TOKENIZER_DIR)
+
+print("Trainable parameters:", trainable_params)
+
+print("Total parameters:", total_params)
+
+print("Best validation loss:", best_val_loss)
