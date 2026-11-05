@@ -1,0 +1,672 @@
+
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+import numpy as np
+# ----------------- Vector Quantizer -----------------
+class VectorQuantizer(layers.Layer):
+    def __init__(self, num_embeddings, embedding_dim, beta=0.25, **kwargs):
+        super().__init__(**kwargs)
+        self.embedding_dim = embedding_dim
+        self.num_embeddings = num_embeddings
+        self.beta = beta
+
+        initializer = tf.random_uniform_initializer()
+        self.embeddings = self.add_weight(
+            shape=(num_embeddings, embedding_dim),
+            initializer=initializer,
+            trainable=True,
+            name="embeddings"
+        )
+
+    def call(self, x, return_indices=False):
+        """
+        x: (batch, H, W, D)
+        return_indices: whether to return the discrete token indices
+        """
+        input_shape = tf.shape(x)
+        flattened = tf.reshape(x, [-1, self.embedding_dim])
+
+        # compute distances to embedding
+        distances = (
+            tf.reduce_sum(flattened**2, axis=1, keepdims=True)
+            - 2 * tf.matmul(flattened, self.embeddings, transpose_b=True)
+            + tf.reduce_sum(self.embeddings**2, axis=1)
+        )
+
+        encoding_indices = tf.argmin(distances, axis=1)  # tokens
+        encodings = tf.one_hot(encoding_indices, self.num_embeddings)
+        quantized = tf.matmul(encodings, self.embeddings)
+        quantized = tf.reshape(quantized, input_shape)
+
+        # losses
+        codebook_loss = tf.reduce_mean((tf.stop_gradient(x) - quantized) ** 2)
+        commitment_loss = tf.reduce_mean((x - tf.stop_gradient(quantized)) ** 2)
+        self.add_loss(codebook_loss + self.beta * commitment_loss)
+
+        # straight-through estimator
+        quantized = x + tf.stop_gradient(quantized - x)
+
+        if return_indices:
+            tokens = tf.reshape(encoding_indices, input_shape[:-1])
+            return quantized, tokens
+        return quantized
+
+vgg = tf.keras.applications.VGG16(include_top=False, weights="imagenet")
+vgg.trainable = False
+
+def perceptual_loss(x, y):
+    # VGG expects inputs in range [0,255] and BGR ordering
+    x_v = tf.keras.applications.vgg16.preprocess_input(x * 255.0)
+    y_v = tf.keras.applications.vgg16.preprocess_input(y * 255.0)
+    feat_x = vgg(x_v)
+    feat_y = vgg(y_v)
+    return tf.reduce_mean((feat_x - feat_y) ** 2)
+
+
+# ----------------- Encoder -----------------
+# def get_encoder(latent_dim=256):
+#     inputs = keras.Input(shape=(224, 224, 3))
+#     x = layers.Conv2D(128, 4, strides=2, padding="same", activation="relu")(inputs)  # 224->112
+#     x = layers.Conv2D(256, 4, strides=2, padding="same", activation="relu")(x)       # 112->56
+#     x = layers.Conv2D(512, 4, strides=2, padding="same", activation="relu")(x)       # 56->28
+#     x = layers.Conv2D(latent_dim, 1, padding="same")(x)                               # 28x28xlatent_dim
+#     return keras.Model(inputs, x, name="encoder")
+def get_encoder(latent_dim=512):
+    inputs = keras.Input(shape=(224, 224, 3))
+    x = layers.Conv2D(128, 4, strides=2, padding="same", activation="relu")(inputs)   # 224 -> 112
+    x = layers.Conv2D(256, 4, strides=2, padding="same", activation="relu")(x)        # 112 -> 56
+    
+    # No third downsample → MUCH less blur
+    x = layers.Conv2D(latent_dim, 1, padding="same")(x)                                # 56×56×latent_dim
+    
+    return keras.Model(inputs, x, name="encoder")
+
+# ----------------- Decoder -----------------
+
+def get_decoder(latent_dim=512):
+    inputs = keras.Input(shape=(56, 56, latent_dim))
+    x = layers.Conv2DTranspose(256, 4, strides=2, padding="same", activation="relu")(inputs)   # 56 -> 112
+    x = layers.Conv2DTranspose(128, 4, strides=2, padding="same", activation="relu")(x)        # 112 -> 224
+    outputs = layers.Conv2DTranspose(3, 3, padding="same", activation="sigmoid")(x)
+    return keras.Model(inputs, outputs, name="decoder")
+
+
+# ----------------- VQ-VAE Model -----------------
+def get_vqvae(latent_dim=256, num_embeddings=1024):
+    encoder = get_encoder(latent_dim)
+    decoder = get_decoder(latent_dim)
+    vq_layer = VectorQuantizer(num_embeddings, latent_dim)
+    
+    inputs = keras.Input(shape=(224, 224, 3))
+    latents = encoder(inputs)
+    quantized, tokens = vq_layer(latents, return_indices=True)
+    outputs = decoder(quantized)
+    
+    return keras.Model(inputs, [outputs, tokens], name="vq_vae_with_tokens"), encoder, decoder, vq_layer
+
+# ----------------- Decode from Tokens -----------------
+def decode_from_tokens(tokens, vq_layer, decoder):
+    """
+    Reconstruct images purely from token indices.
+    tokens: (batch, H, W) integer indices
+    vq_layer: trained VectorQuantizer
+    decoder: trained decoder model
+    """
+    batch_size, H, W = tokens.shape
+    flat_tokens = tf.reshape(tokens, [-1])
+    embeddings = tf.gather(vq_layer.embeddings, flat_tokens)
+    quantized_latents = tf.reshape(embeddings, (batch_size, H, W, vq_layer.embedding_dim))
+    reconstructed = decoder(quantized_latents)
+    return reconstructed
+
+# ----------------- VQVAE Trainer -----------------
+class VQVAETrainer(tf.keras.Model):
+    def __init__(self, latent_dim=256, num_embeddings=1024, **kwargs):
+        super().__init__(**kwargs)
+        self.vqvae, self.encoder, self.decoder, self.vq_layer = get_vqvae(latent_dim, num_embeddings)
+        self.total_loss_tracker = tf.keras.metrics.Mean(name="total_loss")
+        self.recon_loss_tracker = tf.keras.metrics.Mean(name="reconstruction_loss")
+        self.vq_loss_tracker = tf.keras.metrics.Mean(name="vq_loss")
+
+    @property
+    def metrics(self):
+        return [self.total_loss_tracker, self.recon_loss_tracker, self.vq_loss_tracker]
+
+    def train_step(self, x):
+        with tf.GradientTape() as tape:
+            recon, _ = self.vqvae(x)
+            recon_loss = tf.reduce_mean((x - recon) ** 2)
+            total_loss = recon_loss + sum(self.vqvae.losses)
+
+        grads = tape.gradient(total_loss, self.vqvae.trainable_variables)
+        self.optimizer.apply_gradients(zip(grads, self.vqvae.trainable_variables))
+
+        self.total_loss_tracker.update_state(total_loss)
+        self.recon_loss_tracker.update_state(recon_loss)
+        self.vq_loss_tracker.update_state(sum(self.vqvae.losses))
+
+        return {
+            "loss": self.total_loss_tracker.result(),
+            "reconstruction_loss": self.recon_loss_tracker.result(),
+            "vq_loss": self.vq_loss_tracker.result(),
+        }
+
+
+
+
+# ----------------- Example Usage -----------------
+if __name__ == "__main__":
+    import matplotlib.pyplot as plt
+
+    def show_subplot(original, reconstructed):
+        plt.figure(figsize=(6, 3))
+        plt.subplot(1, 2, 1)
+        plt.imshow(np.clip(original, 0, 1))
+        plt.title("Original")
+        plt.axis("off")
+        plt.subplot(1, 2, 2)
+        plt.imshow(np.clip(reconstructed, 0, 1))
+        plt.title("Reconstructed")
+        plt.axis("off")
+        plt.show()
+
+    # Initialize trainer
+    trainer = VQVAETrainer(latent_dim=256, num_embeddings=1024)
+    trainer.compile(optimizer=tf.keras.optimizers.Adam())
+
+    # Dummy images
+    x_dummy = np.random.rand(2, 224, 224, 3).astype(np.float32)
+
+
+import os
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.preprocessing import image
+
+# from vector_quantizer import VQVAETrainer, get_vqvae, get_encoder, get_decoder, VectorQuantizer
+
+DATASET_ROOT = (
+    "/kaggle/input/datasets/hsankesara/"
+    "flickr-image-dataset/flickr30k_images"
+)
+
+IMAGE_ROOT = os.path.join(
+    DATASET_ROOT,
+    "flickr30k_images"
+)
+
+CAPTION_PATH = os.path.join(
+    DATASET_ROOT,
+    "results.csv"
+)
+
+saved_model="/kaggle/working/vq_epoch_4.npy"
+
+class SaveVQVAEWeights(tf.keras.callbacks.Callback):
+
+    def on_epoch_end(self, epoch, logs=None):
+
+        epoch_number = epoch + 1
+
+        # Save encoder weights
+        self.model.encoder.save_weights(
+            f"/kaggle/working/encoder_epoch.weights.h5"
+        )
+
+        # Save vector quantizer weights
+        np.save(
+            f"/kaggle/working/vq_epoch.npy",
+            self.model.vq_layer.get_weights(),
+            allow_pickle=True
+        )
+
+        # Save decoder weights
+        self.model.decoder.save_weights(
+            f"/kaggle/working/decoder_epoch.weights.h5"
+        )
+
+        print(f"\nSaved all weights for epoch {epoch_number}")
+
+
+
+# print("Vector quantizer weights loaded successfully.")
+IMAGE_DIR = IMAGE_ROOT
+IMG_SIZE = (224, 224)
+MAX_IMAGES = 500
+def load_first_n_images(folder, img_size, n):
+    imgs = []
+    files = sorted(os.listdir(folder))[:n]
+    for fname in files:
+        img = image.load_img(os.path.join(folder, fname), target_size=img_size)
+        img = image.img_to_array(img)
+        imgs.append(img)
+    return np.array(imgs, dtype=np.float32)
+
+all_images = load_first_n_images(IMAGE_DIR, IMG_SIZE, MAX_IMAGES)
+print("Loaded:", all_images.shape)
+
+# Normalize 0–1
+all_images = all_images / 255.0
+
+x_train = all_images[:MAX_IMAGES]
+x_test = all_images[MAX_IMAGES:]
+
+print("Train variance:", np.var(x_train))
+
+# # --- Use improved VQ-VAE from previous step -
+# latent_dim = 512
+# num_embeddings = 1024
+
+# vq_layer_loaded = VectorQuantizer(
+#     num_embeddings=1024,
+#     embedding_dim=512
+# )
+
+# dummy_input = tf.random.normal((1, 56, 56, 512))
+
+# _ = vq_layer_loaded(dummy_input)
+
+# vq_weights = np.load(
+#     "/kaggle/working/vq_epoch_20.npy",
+#     allow_pickle=True
+# )
+
+# vq_layer_loaded.set_weights(vq_weights)
+# vqvae_trainer = VQVAETrainer(latent_dim=latent_dim, num_embeddings=num_embeddings)
+# vqvae_trainer.compile(optimizer=tf.keras.optimizers.Adam(1e-3))
+
+# # Reduce batch size for larger image
+# vqvae_trainer.fit(x_train, epochs=20, batch_size=16,callbacks=[SaveVQVAEWeights()]
+# )
+# vq_layer=vqvae_trainer.vq_layer
+
+saved_model = "/kaggle/working/vq_epoch_4.npy"
+
+if os.path.exists(saved_model):
+
+    print("Previous weights found.")
+
+    vqvae_trainer = VQVAETrainer(
+        latent_dim=latent_dim,
+        num_embeddings=num_embeddings
+    )
+
+    # Build model components
+    dummy_input = tf.zeros((1, 224, 224, 3))
+    _ = vqvae_trainer.vqvae(dummy_input)
+
+    # Define saved weight paths
+    encoder_path = "/kaggle/working/encoder_epoch_4.weights.h5"
+    vq_path = "/kaggle/working/vq_epoch_4.npy"
+    decoder_path = "/kaggle/working/decoder_epoch_4.weights.h5"
+
+    # Verify all three files exist
+    if not all(os.path.exists(p) for p in [
+        encoder_path, vq_path, decoder_path
+    ]):
+        raise FileNotFoundError(
+            "One or more VQ-VAE component weight files are missing."
+        )
+    # Load encoder weights
+    vqvae_trainer.encoder.load_weights(encoder_path)
+
+    # Load vector quantizer weights
+    vq_weights = np.load(vq_path, allow_pickle=True)
+    vqvae_trainer.vq_layer.set_weights(vq_weights)
+
+    # Load decoder weights
+    vqvae_trainer.decoder.load_weights(decoder_path)
+
+    vqvae_trainer.compile(optimizer=tf.keras.optimizers.Adam(1e-3))
+    
+    # Reduce batch size for larger image
+    vqvae_trainer.fit(x_train, epochs=20, batch_size=16,callbacks=[SaveVQVAEWeights()]
+    )
+    vq_layer=vqvae_trainer.vq_layer
+
+    initial_epoch = 4
+
+    print("Encoder, vector quantizer and decoder restored.")
+
+else:
+
+    print("No previous weights found.")
+    print("Creating a fresh VQ-VAE.")
+
+    vqvae_trainer = VQVAETrainer(
+        latent_dim=latent_dim,
+        num_embeddings=num_embeddings
+    )
+
+    vqvae_trainer.compile(optimizer=tf.keras.optimizers.Adam(1e-3))
+    
+    # Reduce batch size for larger image
+    vqvae_trainer.fit(x_train, epochs=20, batch_size=16,callbacks=[SaveVQVAEWeights()]
+    )
+    vq_layer=vqvae_trainer.vq_layer
+
+    initial_epoch = 0
+
+inputs = keras.Input(shape=(56, 56, latent_dim))  # encoder output shape
+outputs = vqvae_trainer.vq_layer(inputs, return_indices=False)
+vq_model = keras.Model(inputs, outputs, name="vector_quantizer_model")
+
+# Save only weights of this model
+vq_weights_path = "/kaggle/working/vector_quantizer.weights.h5"
+vq_model.save_weights(vq_weights_path)
+print("VectorQuantizer weights saved to:", vq_weights_path)
+decoder = vqvae_trainer.decoder
+decoder_weights_path = "/kaggle/working/decoder.weights.h5"
+decoder.save_weights(decoder_weights_path)
+
+
+# --- Later: recreate the VQ layer and load weights ---
+# 1. Wrap a new layer in a model with same input shape
+vq_layer_new = VectorQuantizer(num_embeddings=num_embeddings, embedding_dim=latent_dim)
+inputs_new = keras.Input(shape=(56, 56, latent_dim))
+outputs_new = vq_layer_new(inputs_new, return_indices=False)
+vq_model_new = keras.Model(inputs_new, outputs_new, name="vector_quantizer_model_new")
+
+# 2. Dummy forward to build weights
+dummy_input = tf.random.normal((1, 56, 56, latent_dim))
+_ = vq_model_new(dummy_input)
+
+# 3. Load weights
+vq_model_new.load_weights(vq_weights_path)
+vq_layer_loaded = vq_model_new.layers[-1]   # last layer in model
+
+decoder_new = get_decoder(latent_dim=latent_dim)
+dummy_latents = tf.random.normal((1, 56, 56, latent_dim))
+_ = decoder_new(dummy_latents)
+decoder_new.load_weights(decoder_weights_path)
+
+print("VectorQuantizer weights loaded successfully!")
+
+
+
+import os
+import numpy as np
+import tensorflow as tf
+import matplotlib.pyplot as plt
+
+from tensorflow import keras
+from tensorflow.keras.preprocessing import image
+
+# ============================================================
+# 1. CONFIGURATION
+# ============================================================
+
+DATASET_ROOT = (
+    "/kaggle/input/datasets/hsankesara/"
+    "flickr-image-dataset/flickr30k_images"
+)
+
+IMAGE_ROOT = os.path.join(
+    DATASET_ROOT,
+    "flickr30k_images"
+)
+
+IMAGE_SIZE = (224, 224)
+BATCH_SIZE = 4
+
+LATENT_DIM = 512
+NUM_EMBEDDINGS = 1024
+
+VQ_WEIGHTS_PATH = (
+    "/kaggle/working/vector_quantizer.weights.h5"
+)
+
+DECODER_WEIGHTS_PATH = (
+    "/kaggle/working/decoder.weights.h5"
+)
+
+# ============================================================
+# 2. CHECK SAVED WEIGHT FILES
+# ============================================================
+
+if not os.path.exists(VQ_WEIGHTS_PATH):
+    raise FileNotFoundError(VQ_WEIGHTS_PATH)
+
+if not os.path.exists(DECODER_WEIGHTS_PATH):
+    raise FileNotFoundError(DECODER_WEIGHTS_PATH)
+
+print("Vector quantizer weights found.")
+print("Decoder weights found.")
+
+# ============================================================
+# 3. LOAD A SMALL FLICKR30K SAMPLE
+# ============================================================
+
+def load_first_n_images(folder, img_size, n):
+
+    imgs = []
+
+    files = sorted([
+        f for f in os.listdir(folder)
+        if f.lower().endswith((".jpg", ".jpeg", ".png"))
+    ])[:n]
+
+    for fname in files:
+
+        img = image.load_img(
+            os.path.join(folder, fname),
+            target_size=img_size
+        )
+
+        img = image.img_to_array(img)
+
+        imgs.append(img)
+
+    return np.array(imgs, dtype=np.float32), files
+
+
+test_images, sample_files = load_first_n_images(
+    IMAGE_ROOT,
+    IMAGE_SIZE,
+    BATCH_SIZE
+)
+
+test_images = test_images / 255.0
+
+print("\nTest images:", test_images.shape)
+print("Selected files:", sample_files)
+
+# ============================================================
+# 4. RECREATE VECTOR QUANTIZER AND LOAD WEIGHTS
+# ============================================================
+
+vq_layer_loaded = VectorQuantizer(
+    num_embeddings=NUM_EMBEDDINGS,
+    embedding_dim=LATENT_DIM
+)
+
+inputs = keras.Input(
+    shape=(56, 56, LATENT_DIM)
+)
+
+quantized_outputs = vq_layer_loaded(
+    inputs,
+    return_indices=False
+)
+
+vq_model = keras.Model(
+    inputs,
+    quantized_outputs
+)
+
+# Build model before loading weights
+dummy_latents = tf.random.normal(
+    (1, 56, 56, LATENT_DIM)
+)
+
+_ = vq_model(dummy_latents)
+
+vq_model.load_weights(VQ_WEIGHTS_PATH)
+
+print("\nVector quantizer loaded successfully.")
+
+# ============================================================
+# 5. RECREATE DECODER AND LOAD WEIGHTS
+# ============================================================
+
+decoder = get_decoder(
+    latent_dim=LATENT_DIM
+)
+
+# Build decoder before loading weights
+_ = decoder(dummy_latents)
+
+decoder.load_weights(DECODER_WEIGHTS_PATH)
+
+print("Decoder loaded successfully.")
+
+# ============================================================
+# 6. LOAD ENCODER
+# ============================================================
+
+# IMPORTANT:
+# Your provided saving code did not save encoder weights.
+# We must use the original trained encoder if it is still
+# available in the notebook.
+
+if "vqvae_trainer" not in globals():
+
+    raise ValueError(
+        "The trained VQVAETrainer is unavailable. "
+        "Your provided code did not save encoder weights, "
+        "so the trained encoder cannot be reconstructed "
+        "from the two saved weight files."
+    )
+
+encoder = vqvae_trainer.encoder
+
+print("Using the encoder from the trained VQVAETrainer.")
+
+# ============================================================
+# 7. ENCODE IMAGES
+# ============================================================
+
+encoded = encoder.predict(
+    test_images,
+    verbose=0
+)
+
+print("\nEncoded shape:", encoded.shape)
+
+# ============================================================
+# 8. QUANTIZE ENCODED LATENTS
+# ============================================================
+
+quantized = vq_model.predict(
+    encoded,
+    verbose=0
+)
+
+print("Quantized shape:", quantized.shape)
+
+# ============================================================
+# 9. RECONSTRUCT IMAGES
+# ============================================================
+
+reconstructed = decoder.predict(
+    quantized,
+    verbose=0
+)
+
+print("Reconstructed shape:", reconstructed.shape)
+
+# ============================================================
+# 10. DISPLAY ORIGINAL VS RECONSTRUCTED
+# ============================================================
+
+num_images = len(test_images)
+
+plt.figure(figsize=(14, 7))
+
+for i in range(num_images):
+
+    plt.subplot(2, num_images, i + 1)
+
+    plt.imshow(
+        np.clip(test_images[i], 0, 1)
+    )
+
+    plt.title("Original")
+
+    plt.axis("off")
+
+    plt.subplot(
+        2,
+        num_images,
+        num_images + i + 1
+    )
+
+    reconstructed_img = reconstructed[i]
+
+    reconstructed_img = np.clip(
+        reconstructed_img,
+        0,
+        1
+    )
+
+    plt.imshow(reconstructed_img)
+
+    plt.title("Reconstructed")
+
+    plt.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+# ============================================================
+# 11. DISPLAY QUANTIZED LATENT REPRESENTATIONS
+# ============================================================
+
+plt.figure(figsize=(12, 4))
+
+for i in range(num_images):
+
+    latent_image = quantized[i]
+
+    latent_image = np.mean(
+        latent_image,
+        axis=-1
+    )
+
+    plt.subplot(1, num_images, i + 1)
+
+    plt.imshow(
+        latent_image,
+        cmap="viridis"
+    )
+
+    plt.title("Quantized Latent")
+
+    plt.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+# ============================================================
+# 12. CALCULATE RECONSTRUCTION MSE
+# ============================================================
+
+mse = np.mean(
+    np.square(
+        test_images - reconstructed
+    )
+)
+
+print("\n================================")
+print("VQ-VAE EVALUATION")
+print("================================")
+
+print("Test images:", len(test_images))
+print("Original shape:", test_images.shape)
+print("Encoded shape:", encoded.shape)
+print("Quantized shape:", quantized.shape)
+print("Reconstructed shape:", reconstructed.shape)
+print("Reconstruction MSE:", mse)
+
+
